@@ -7,6 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Markets](https://img.shields.io/badge/Markets-A_Share%20%7C%20US%20%7C%20Crypto-orange.svg)]()
+[![Release](https://img.shields.io/github/v/release/ietigerjue/trade-agent)](https://github.com/ietigerjue/trade-agent/releases)
 
 </div>
 
@@ -17,6 +18,45 @@
 **[English](#english)** &nbsp;|&nbsp; **[中文](#chinese)**
 
 </div>
+
+---
+
+<a name="english"></a>
+
+## 🚀 Quick Install
+
+```bash
+# Clone the repo
+git clone https://github.com/ietigerjue/trade-agent.git
+cd trade-agent
+
+# Run any agent (Python 3.10+, zero pip dependencies)
+python a_share_daily_agent.py --top 8
+python stock_daily_agent.py --top 8
+python crypto_daily_agent.py --top 8
+
+# Run rolling backtest
+python backtest_a_share_skill.py --mode rolling --top 8 --lookback-days 365 --sample-step 5
+```
+
+### Use as a Claude Code Skill
+
+Just tell Claude Code to clone and run it:
+
+```
+请 clone https://github.com/ietigerjue/trade-agent 然后运行 a_share_daily_agent.py --top 8
+```
+
+Claude Code will handle the clone, understand the tooling, and execute agents directly.
+
+Or set up a recurring daily scan:
+
+```
+/loop 1d 请按顺序执行以下操作：
+1. 进入 trade-agent 目录
+2. 运行 python a_share_daily_agent.py --top 8
+3. 汇总报告要点告诉我
+```
 
 ---
 
@@ -135,6 +175,41 @@ Pure Python, no dependencies beyond stdlib:
 ---
 
 <a name="chinese"></a>
+
+## 🚀 安装使用
+
+```bash
+# 克隆仓库
+git clone https://github.com/ietigerjue/trade-agent.git
+cd trade-agent
+
+# 运行任一扫描器（需要 Python 3.10+，零依赖）
+python a_share_daily_agent.py --top 8
+python stock_daily_agent.py --top 8
+python crypto_daily_agent.py --top 8
+
+# 运行滚动回测
+python backtest_a_share_skill.py --mode rolling --top 8 --lookback-days 365 --sample-step 5
+```
+
+### 作为 Claude Code Skill 使用
+
+直接告诉 Claude Code 克隆并运行：
+
+```
+请 clone https://github.com/ietigerjue/trade-agent 然后运行 a_share_daily_agent.py --top 8
+```
+
+Claude Code 会自动 clone 仓库、理解工具用法并执行扫描器。
+
+设置定时扫描：
+
+```
+/loop 1d 请按顺序执行以下操作：
+1. 进入 trade-agent 目录
+2. 运行 python a_share_daily_agent.py --top 8
+3. 汇总报告要点告诉我
+```
 
 ## 📊 概述
 
