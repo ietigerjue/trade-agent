@@ -1,199 +1,261 @@
-# Trade Agent
+<div align="center">
 
-This workspace currently contains a lightweight daily cryptocurrency heat and
-pattern-analysis agent.
+# Trade Agent / 交易助手
 
-## Daily Crypto Agent
+**Multi-Market Strategy Scanner · 多市场策略扫描器**
 
-Run:
+[![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Markets](https://img.shields.io/badge/Markets-A_Share%20%7C%20US%20%7C%20Crypto-orange.svg)]()
+
+</div>
+
+---
+
+<div align="center">
+
+**[English](#english)** &nbsp;|&nbsp; **[中文](#chinese)**
+
+</div>
+
+---
+
+<a name="english"></a>
+
+## 📊 Overview
+
+Trade Agent is a multi-market technical analysis scanner that generates daily strategy reports for A-shares (Shanghai/Shenzhen), US stocks, and cryptocurrencies. No API keys required — all data comes from public endpoints.
+
+**Core philosophy**: Scan the entire market, apply strict price-action rules, rank candidates by confidence, and produce structured Markdown reports. This is research automation, not financial advice or an execution bot.
+
+## 🏗️ Architecture
+
+```
+trade-agent/
+├── trading_strategy.py              # Core library — data types, indicators, trade plans
+├── a_share_daily_agent.py           # A-share daily scanner (most comprehensive)
+├── backtest_a_share_skill.py        # Slice & rolling backtest engine
+├── review_a_share_10day_signals.py  # 10-day historical signal review
+├── stock_daily_agent.py             # US stock long/short pattern scanner
+├── crypto_daily_agent.py            # Crypto heat & pattern analysis
+├── send_a_share_report_to_lark.py   # Lark/Feishu message delivery
+├── a_share_watchlist.txt            # Personal watchlist (customizable)
+├── run_*.ps1                        # PowerShell launchers
+└── reports/                         # Generated reports (gitignored)
+```
+
+## 📦 Agents
+
+### A-Share Daily Agent (`a_share_daily_agent.py`) 
+
+Scans all liquid Shanghai/Shenzhen main-board stocks with multiple strategies:
+
+| Strategy | Description |
+|---|---|
+| **Strategy 1A** | Breakout-retest: price breaks above 30-day resistance, then retests and holds above the former resistance line |
+| **Strategy 1B** | MA30 second wave: prior run-up ≥40%, 12-55% pullback into rising MA30, bullish restart after retest holds |
+| **Strategy 2** | Wyckoff re-accumulation: uptrend → horizontal box → lower-edge bullish pinbar |
+| **Trend Pool** | Trend-quality stocks requiring buy/sell ratio ≥2.0x, awaiting breakout trigger |
+| **T+0 Funds** | Liquid ETFs/LOFs that typically support T+0 (cross-border/QDII/commodity/bond) |
+
+**Confidence layers**:
+- Price action (engulfing, morning star, pinbar, breakout bar quality)
+- Al Brooks-style context (trend strength, bar overlap, breakout follow-through)
+- MACD divergence (bullish/bearish)
+- Reversal structures (double/triple bottom, inverse H&S, rounding bottom, V-bottom)
+- Sector/industry strength resonance
+- Community sentiment (Eastmoney Guba discussion analysis)
 
 ```powershell
-.\run_crypto_daily_agent.ps1
+.\run_a_share_daily_agent.ps1 --top 8 --min-amount 80000000
 ```
 
-The agent writes:
+### A-Share Backtest (`backtest_a_share_skill.py`)
 
-- `reports/crypto_daily_YYYY-MM-DD.md`
-- `reports/latest.md`
-
-It uses Coinbase public market endpoints and does not require API keys.
-
-## What It Measures
-
-The heat score combines:
-
-- 24h volume and volume-to-market-cap turnover
-- 1h, 24h, and 7d momentum
-- Market-cap-rank quality filter
-
-The pattern scan estimates:
-
-- SMA20 and SMA50 trend state
-- MACD direction
-- RSI14 overbought/oversold state
-- 20-day breakout or breakdown proximity
-- 7d versus 30d volume expansion
-- Annualized realized volatility
-
-This is market research automation, not financial advice or an execution bot.
-
-## Daily US Stock Long/Short Agent
-
-Run:
+Two modes:
 
 ```powershell
-.\run_stock_daily_agent.ps1
+# Slice mode — single historical date
+python .\backtest_a_share_skill.py --top 8 --days-ago 30 --hold-days 10
+
+# Rolling mode — multiple signal dates with factor attribution
+python .\backtest_a_share_skill.py --mode rolling --top 8 --lookback-days 365 --sample-step 5 --hold-days-list 5,10,20
+
+# Breakeven stop testing
+python .\backtest_a_share_skill.py --mode rolling --top 8 --breakeven-trigger-pct 8
 ```
 
-The agent writes:
+Measures: return, MFE/MAE, structure stop hits, breakeven stop hits, target hits, HS300 excess return, factor group attribution.
 
-- `reports/stock_daily_YYYY-MM-DD.md`
-- `reports/stock_latest.md`
+### 10-Day Signal Review (`review_a_share_10day_signals.py`)
 
-It scans a default liquid US stock universe and recommends watchlist candidates
-whose chart structures look more suitable for long or short ideas.
-
-Long and short reasons use:
-
-- 20/50/100-day moving-average structure
-- 20-day and 55-day breakout or breakdown levels
-- MACD direction
-- RSI
-- 5-day momentum
-- Volume versus the 20-day average
-
-## Daily A-Share Price-Action Agent
-
-Run:
+Reviews strict candidates from 10 days ago using the same execution discipline as the backtest: signal day is NOT an entry; entry only after next-session retest confirmation.
 
 ```powershell
-.\run_a_share_daily_agent.ps1
+.\run_a_share_10day_signal_review.ps1 --days-ago 10
 ```
 
-The agent writes:
+### US Stock Agent (`stock_daily_agent.py`)
 
-- `reports/a_share_daily_YYYY-MM-DD.md`
-- `reports/a_share_latest.md`
+Scans ~80 liquid US stocks via Nasdaq public API. Ranks by long/short pattern scores using moving-average structure, breakout levels, MACD, RSI, momentum, and volume.
 
-It scans Shanghai/Shenzhen main-board A shares and builds a long watchlist
-around your bare-K strategy:
-
-- Recent breakout above the prior 30-day resistance, followed by a retest that
-  holds above the former resistance line
-- A valid retest must touch near the former resistance, close back above it,
-  and print either a bullish close or bullish pinbar
-- Strategy 1B separately catches strong second-wave setups: a prior run-up of
-  at least 40%, a 12%-55% pullback into rising MA30 support, and a bullish
-  restart after the MA30 retest holds
-- The moving-average hard gate is lighter: MA20 and MA30 must be rising, and
-  the close must be above MA20
-- Bullish engulfing, morning star, successful retest near the breakout line, or
-  MA30 second-wave restart
-- Structure-stop reward/risk to the next overhead resistance or conservative
-  measured-move target; strict candidates require reward/risk greater than
-  `1.0`, and the structure-stop risk must not exceed 5%
-- Reward/risk confidence is shown as a separate trade-space quality field:
-  roughly RR 1.0 = 50%, RR 1.5 = 65%, RR 2.0 = 78%, and RR 3.0+ = 90%+
-- Candidate ranking prioritizes bare-K retest/MA30 second-wave structure and bullish
-  K-line confirmation before trend, sector, and news context
-- Signal-day breakouts are treated as watchlist setups, not strict candidates;
-  strict candidates appear only after price retests near the breakout/support
-  line or rising MA30 and holds above it
-- Al Brooks-style right-side context is used as a confidence/risk layer: strong
-  trend context, breakout follow-through, and second retest holds add
-  confidence; heavy bar overlap, trading-range upper-edge first breakouts,
-  weak breakout bars, and quick moves back below resistance add risk
-- Sector strength contributes to confidence and ranking: strong industry or
-  concept resonance adds bullish confidence, while weak sector context adds
-  bearish risk; it is not a hard entry filter
-- Eastmoney Guba community discussion is a low-weight sentiment layer:
-  active discussion can slightly lift confidence/ranking, while suspected
-  hype or lure-style wording adds a weak risk note and small ranking drag; it
-  is not a hard entry filter
-- 30-day gain velocity and 60-day gain
-- 60-day buy/sell pressure, using daily up-candle volume divided by daily
-  down-candle volume as a stable automation proxy; default threshold is `2.0x`
-- Bullish confidence boosts when price breaks above MA30 on expanded volume, or
-  retests MA30 without breaking and prints a bullish pinbar
-- Bullish confidence boosts when price breaks resistance with expanded volume
-- MACD bullish/bearish divergence, M-top, and multiple-top structures adjust
-  bullish confidence and bearish risk; default high-confidence gate is `75%`
-- Bottom reversal structures such as double bottom, triple bottom, inverse
-  head-and-shoulders, rounding bottom, and V-bottom right-side confirmation
-  add bullish confidence
-- Strategy 2 adds a separate Wyckoff re-accumulation watch section: after a
-  prior uptrend, find stocks consolidating in a recent 10-day horizontal range whose latest
-  candle is near the lower range boundary and forms a bullish pinbar
-- A separate sector T+0 fund watch section scans liquid listed funds whose
-  names suggest usually T+0-eligible categories such as cross-border/QDII,
-  commodity, bond, and money-market ETF/LOF products. It applies the same
-  Strategy 1 bare-K breakout screen, but keeps the results separate from
-  individual-stock candidates and treats T+0 eligibility as something to
-  verify in the broker trading rules.
-- Rolling backtests track factor groups such as rounding bottoms, volume-backed
-  breakouts, retest-hold candles, and neckline breakouts. Treat factor
-  attribution as research context unless a reweighting change improves the
-  rolling report.
-- Broad-market index context, industry/concept strength, and lightweight
-  company announcement/news notes
-
-The report separates strict entry triggers from a trend watch pool. The trend
-pool is for stocks with good 30/60-day trend quality and buy-side pressure that
-still need a breakout, retest, or bullish candlestick trigger before matching
-the trading plan.
-
-You can also maintain `a_share_watchlist.txt` with one stock per line:
-
-```text
-002674 兴业科技
-600584 长电科技
+```powershell
+.\run_stock_daily_agent.ps1 --top 8
 ```
 
-The daily A-share report adds a separate watchlist strategy check. It reuses
-the same entry rules, flags stocks as matching, near-trigger, trend watch, or
-not triggered, and does not change the main-board market scan.
+### Crypto Agent (`crypto_daily_agent.py`)
 
-To generate the report and send it to Feishu/Lark:
+Uses Coinbase public endpoints. Heat score combines liquidity, turnover, multi-timeframe momentum, and market-cap rank. Generates 15m/1h/4h trade plans.
+
+```powershell
+.\run_crypto_daily_agent.ps1 --top 8
+```
+
+### Lark/Feishu Report Delivery
 
 ```powershell
 .\run_a_share_daily_and_send_lark.ps1
 ```
 
-Configure one of these before sending:
+Set `LARK_WEBHOOK_URL` or `LARK_CHAT_ID` before use.
 
-- `LARK_WEBHOOK_URL` or `FEISHU_WEBHOOK_URL` for a custom bot webhook
-- `LARK_CHAT_ID` or `LARK_USER_ID` with `lark-cli` available on `PATH`
+## 🔧 Core Library (`trading_strategy.py`)
 
-Optional: set `LARK_WEBHOOK_SECRET` / `FEISHU_WEBHOOK_SECRET` for signed custom
-bot webhooks, or `LARK_SEND_AS=user` when sending through `lark-cli` as a user.
+Pure Python, no dependencies beyond stdlib:
 
-To backtest the current A-share skill on a historical slice:
+- `Candle` / `TradePlan` data classes (frozen, type-safe)
+- EMA, MACD, RSI, SMA indicators
+- Support/resistance detection
+- Candlestick patterns: bullish/bearish engulfing, morning star, bearish piercing, double/multiple top
+- MACD divergence (bullish/bearish)
+- Higher low detection
+- Risk/reward calculation
+- Confidence-scored trade plan builder
+
+---
+
+<a name="chinese"></a>
+
+## 📊 概述
+
+Trade Agent 是一个多市场技术分析扫描器，每日自动生成 A 股（沪深主板）、美股和加密货币的策略报告。无需 API 密钥——所有数据来自公开接口。
+
+**核心理念**：全市场扫描，严格按价格行为规则筛选，按置信度排序，产出结构化 Markdown 报告。这是研究自动化工具，不是投资建议或自动交易机器人。
+
+## 🏗️ 项目架构
+
+```
+trade-agent/
+├── trading_strategy.py              # 核心库 — 数据结构、技术指标、交易计划
+├── a_share_daily_agent.py           # A股利器（最全面的扫描器）
+├── backtest_a_share_skill.py        # 切片&滚动回测引擎
+├── review_a_share_10day_signals.py  # 10天历史信号复盘
+├── stock_daily_agent.py             # 美股多空形态扫描
+├── crypto_daily_agent.py            # 加密货币热度分析
+├── send_a_share_report_to_lark.py   # 飞书/Lark 报告推送
+├── a_share_watchlist.txt            # 个人自选股（可自定义）
+├── run_*.ps1                        # PowerShell 启动脚本
+└── reports/                         # 生成的报告（已 gitignore）
+```
+
+## 📦 各模块说明
+
+### A股日线扫描器 (`a_share_daily_agent.py`)
+
+扫描所有符合条件的沪深主板股票，多策略并行：
+
+| 策略 | 描述 |
+|---|---|
+| **策略一A** | 突破后回踩：价格突破前30日压力位，回踩不破站稳 |
+| **策略一B** | MA30二波回踩：前段涨幅≥40%，回撤12-55%至MA30，放量重启 |
+| **策略二** | 威科夫再吸筹：上涨后横盘箱体，下沿看涨Pinbar |
+| **趋势观察池** | 趋势质量达标（60日买卖盘≥2.0x），等待裸K触发 |
+| **T+0基金** | 跨境/QDII/商品/债券类流动性ETF/LOF，按策略一筛选 |
+
+**置信度层次**：
+- 价格行为（吞没、启明星、Pinbar、突破K线质量）
+- Al Brooks 上下文（趋势强度、K线重叠率、突破跟进）
+- MACD背离（底背离/顶背离）
+- 反转结构（双底/三重底/头肩底/圆弧底/V底）
+- 板块/行业强度共振
+- 社区情绪（东方财富股吧讨论分析）
 
 ```powershell
+.\run_a_share_daily_agent.ps1 --top 8 --min-amount 80000000
+```
+
+### A股回测引擎 (`backtest_a_share_skill.py`)
+
+两种模式：
+
+```powershell
+# 切片回测 — 单个历史日期
 python .\backtest_a_share_skill.py --top 8 --days-ago 30 --hold-days 10
-```
 
-This selects the highest bullish-confidence strict long candidates as of the
-historical slice date, then measures their close-to-close return after the
-requested number of trading days.
-
-For rolling validation across many signal dates:
-
-```powershell
+# 滚动回测 — 多信号日 + 因子归因
 python .\backtest_a_share_skill.py --mode rolling --top 8 --lookback-days 365 --sample-step 5 --hold-days-list 5,10,20
+
+# 保本止损测试
+python .\backtest_a_share_skill.py --mode rolling --top 8 --breakeven-trigger-pct 8
 ```
 
-The rolling report treats the breakout signal day as a setup day, then only
-enters if price retests near the breakout line and holds above it. It adds
-5/10/20-day returns, relative HS300 return, MFE/MAE, structure-stop hits,
-pressure-target hits, and factor grouping.
+测量指标：收益率、MFE/MAE、结构止损触发率、保本止损触发率、目标触达率、沪深300超额收益、因子分组归因。
 
-Optional breakeven-stop testing:
+### 10日信号复盘 (`review_a_share_10day_signals.py`)
+
+复盘10天前的严格做多候选，使用与回测一致的执行纪律：信号日不买入，仅次日回踩确认后才视为进场。
 
 ```powershell
-python .\backtest_a_share_skill.py --mode rolling --top 8 --lookback-days 365 --sample-step 5 --hold-days-list 5,10,20 --breakeven-trigger-pct 8
+.\run_a_share_10day_signal_review.ps1 --days-ago 10
 ```
 
-The 2026-05-25 rolling tests did not support enabling breakeven stops by
-default: 3%, 5%, and 8% breakeven triggers all reduced average returns versus
-the no-breakeven baseline.
+### 美股扫描器 (`stock_daily_agent.py`)
+
+通过 Nasdaq 公开 API 扫描约80只高流动性美股，按多/空形态评分排序。
+
+```powershell
+.\run_stock_daily_agent.ps1 --top 8
+```
+
+### 加密货币扫描器 (`crypto_daily_agent.py`)
+
+使用 Coinbase 公开接口。热度评分综合流动性、换手率、多周期动量和市值排名。生成 15分钟/1小时/4小时交易计划。
+
+```powershell
+.\run_crypto_daily_agent.ps1 --top 8
+```
+
+### 飞书/Lark 报告推送
+
+```powershell
+.\run_a_share_daily_and_send_lark.ps1
+```
+
+使用前需配置 `LARK_WEBHOOK_URL` 或 `LARK_CHAT_ID`。
+
+## 🔧 核心技术库 (`trading_strategy.py`)
+
+纯 Python，仅依赖标准库：
+
+- `Candle` / `TradePlan` 数据类（不可变、类型安全）
+- EMA、MACD、RSI、SMA 技术指标
+- 支撑/阻力位检测
+- K线形态：看涨/看跌吞没、启明星、看跌刺穿、双顶/多重顶
+- MACD 背离（底背离/顶背离）
+- 低点抬高检测
+- 盈亏比计算
+- 置信度评分的交易计划构建器
+
+## ⚠️ 免责声明
+
+本项目仅用于研究和教育目的。不构成投资建议。所有策略信号均为历史数据的技术形态分析，不代表未来收益。交易有风险，入市需谨慎。
+
+---
+
+<div align="center">
+
+**This is market research automation, not financial advice or an execution bot.**
+
+**这是市场研究自动化工具，不是投资建议或自动交易机器人。**
+
+</div>
