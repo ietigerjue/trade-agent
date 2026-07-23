@@ -13,13 +13,8 @@
 
 ---
 
-<div align="center">
-
-**[English](#english)** &nbsp;|&nbsp; **[中文](#chinese)**
-
-</div>
-
----
+<details open>
+<summary><b>🇬🇧 English</b></summary>
 
 <a name="english"></a>
 
@@ -314,6 +309,11 @@ This project is for **research and educational purposes only**. It does NOT cons
 
 ---
 
+</details>
+
+<details>
+<summary><b>🇨🇳 中文</b></summary>
+
 <a name="chinese"></a>
 
 ## 🚀 快速开始
@@ -600,3 +600,5 @@ python stock-valuation/scripts/valuation_models.py <data_json_path>
 **这是市场研究自动化工具，不是投资建议或自动交易机器人。**
 
 </div>
+
+</details>
