@@ -23,39 +23,44 @@
 
 <a name="english"></a>
 
-## 🚀 Quick Install
+## 🚀 Quick Start
+
+### Step 1: Clone & install as a skill
 
 ```bash
 git clone https://github.com/ietigerjue/trade-agent.git
-cd trade-agent
-
-# --- Trade Agent: technical scanner (zero dependencies) ---
-python a_share_daily_agent.py --top 8
-python stock_daily_agent.py --top 8
-python crypto_daily_agent.py --top 8
-
-# --- Stock Valuation: fundamental analysis ---
-pip install akshare yfinance numpy
-python stock-valuation/scripts/fetch_data.py 600519 A
-python stock-valuation/scripts/valuation_models.py <data_json_path>
 ```
 
-### Use as Claude Code Skills
+Copy or symlink the repo into your agent's skills directory. For Claude Code:
 
-**Trade Agent** — tell Claude Code to clone and run:
-
-```
-请 clone https://github.com/ietigerjue/trade-agent 然后运行 a_share_daily_agent.py --top 8
-```
-
-**Stock Valuation** — install as a skill, then just ask naturally:
-
-```
-对茅台进行估值
-What's AAPL's fair value?
+```bash
+# Install stock-valuation as a skill
+cp -r stock-valuation ~/.claude/skills/stock-valuation
 ```
 
-Claude Code will auto-trigger the valuation pipeline: fetch financials → run 5 models → cross-validate → output a 3-month price target range.
+### Step 2: Ask your AI agent
+
+That's it. Now just talk to your agent in **plain language**:
+
+| What you say | What happens |
+|---|---|
+| "生成本日A股报告" / "Generate today's A-share report" | Runs the scanner, outputs a structured Markdown report |
+| "跑一下美股日报" / "Scan US stocks today" | Runs `stock_daily_agent.py`, ranks long/short candidates |
+| "今天加密货币什么情况" / "Crypto heat check" | Runs `crypto_daily_agent.py`, multi-timeframe analysis |
+| "对茅台进行估值" / "Value Apple" | Auto-triggers 5-model valuation → 3-month price target |
+| "把今天的A股报告推到飞书" / "Send A-share report to Lark" | Runs scanner + delivers via webhook or lark-cli |
+
+### Step 3: Schedule recurring reports
+
+Tell your agent to set up a daily timer:
+
+```
+/loop 1d 进入 trade-agent 目录，运行 python a_share_daily_agent.py --top 8，把摘要发到飞书
+```
+
+Your agent will run the report at the same time every day, hands-free.
+
+> **Requirements**: Python 3.10+. Trade Agent scripts are zero-dependency (stdlib only). Stock Valuation needs `pip install akshare yfinance numpy`. For Lark delivery, see [📨 Lark / Feishu Report Delivery](#-lark--feishu-report-delivery) below.
 
 ---
 
@@ -311,39 +316,44 @@ This project is for **research and educational purposes only**. It does NOT cons
 
 <a name="chinese"></a>
 
-## 🚀 安装使用
+## 🚀 快速开始
+
+### 第一步：克隆并安装为 skill
 
 ```bash
 git clone https://github.com/ietigerjue/trade-agent.git
-cd trade-agent
-
-# --- Trade Agent：技术扫描器（零依赖）---
-python a_share_daily_agent.py --top 8
-python stock_daily_agent.py --top 8
-python crypto_daily_agent.py --top 8
-
-# --- Stock Valuation：基本面估值 ---
-pip install akshare yfinance numpy
-python stock-valuation/scripts/fetch_data.py 600519 A
-python stock-valuation/scripts/valuation_models.py <data_json_path>
 ```
 
-### 作为 Claude Code Skill 使用
+将仓库复制或软链接到你的 AI 助手的 skills 目录。Claude Code 示例：
 
-**Trade Agent** — 告诉 Claude Code 克隆并运行：
-
-```
-请 clone https://github.com/ietigerjue/trade-agent 然后运行 a_share_daily_agent.py --top 8
-```
-
-**Stock Valuation** — 安装为 skill 后直接用自然语言提问：
-
-```
-对茅台进行估值
-AAPL 现在高估还是低估？
+```bash
+# 安装 stock-valuation skill
+cp -r stock-valuation ~/.claude/skills/stock-valuation
 ```
 
-Claude Code 会自动触发估值流程：爬取财报 → 运行5个模型 → 交叉验证 → 输出三个月目标价区间。
+### 第二步：用自然语言告诉你的 AI 助手
+
+搞定。直接用**日常对话**指挥你的 Agent：
+
+| 你说 | Agent 做什么 |
+|---|---|
+| "生成本日A股报告" | 运行扫描器，输出结构化 Markdown 日报 |
+| "跑一下美股日报" | 运行 `stock_daily_agent.py`，按多空评分排序候选 |
+| "今天加密货币什么情况" | 运行 `crypto_daily_agent.py`，多周期热度分析 |
+| "对茅台进行估值" | 自动触发 5 模型估值 → 三个月目标价区间 |
+| "把今天的A股报告推到飞书" | 运行扫描器 + 通过 webhook 或 lark-cli 推送到飞书 |
+
+### 第三步：设置定时自动报告
+
+告诉你的 Agent 设置每日定时任务：
+
+```
+/loop 1d 进入 trade-agent 目录，运行 python a_share_daily_agent.py --top 8，把摘要发到飞书
+```
+
+Agent 会每天在同一时间自动运行报告，完全无需手动操作。
+
+> **环境要求**：Python 3.10+。Trade Agent 脚本零依赖（仅标准库）。Stock Valuation 需要 `pip install akshare yfinance numpy`。飞书推送配置见下方 [📨 飞书 / Lark 报告推送](#-飞书--lark-报告推送)。
 
 ---
 
