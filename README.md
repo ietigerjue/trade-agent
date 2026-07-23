@@ -160,6 +160,66 @@ Coinbase public endpoints. Heat score + multi-timeframe trade plans (15m/1h/4h).
 .\run_crypto_daily_agent.ps1 --top 8
 ```
 
+### 📨 Lark / Feishu Report Delivery
+
+Send daily reports to your Feishu/Lark chat. Two setup modes:
+
+#### Mode A: Custom Bot Webhook (easiest)
+
+1. In Feishu/Lark, create a custom bot in the target group chat
+2. Copy the webhook URL
+3. Set environment variables:
+
+```powershell
+# PowerShell
+$env:FEISHU_WEBHOOK_URL = "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxx"
+
+# (Optional) If you set a signing secret on the bot:
+$env:LARK_WEBHOOK_SECRET = "your-signing-secret"
+```
+
+```bash
+# Bash / Git Bash
+export FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxxx"
+```
+
+#### Mode B: lark-cli (for direct message or chat targeting)
+
+```bash
+# 1. Install lark-cli globally
+npm install -g lark-cli
+
+# 2. Login & authorize (opens browser)
+lark-cli auth login
+
+# 3. Verify auth status
+lark-cli auth status
+```
+
+Then specify a target (optional — auto-resolves to your own DM if omitted):
+
+```powershell
+# Send to a specific chat
+$env:LARK_CHAT_ID = "oc_xxxxx"
+
+# Or send to a specific user's DM
+$env:LARK_USER_ID = "ou_xxxxx"
+```
+
+> **How to get chat/user IDs**: `lark-cli auth status` shows your own `userOpenId`. For chat IDs, use `lark-cli im list-chats` or check the chat info in the Feishu/Lark app.
+
+#### Run the combined pipeline
+
+```powershell
+# A-share scan + Lark delivery
+.\run_a_share_daily_and_send_lark.ps1
+```
+
+The script will:
+1. Run the A-share scanner and generate the report
+2. Pick up `LARK_WEBHOOK_URL` / `FEISHU_WEBHOOK_URL` if set, otherwise fallback to `lark-cli`
+3. Deliver the report as a file to the target chat or DM
+
 ### Core Library (`trading_strategy.py`)
 
 Pure Python, stdlib only: `Candle` / `TradePlan` dataclasses, EMA/MACD/RSI/SMA, support/resistance detection, candlestick patterns (engulfing, morning star, piercing, double top), MACD divergence, higher-low detection, risk/reward calculation, confidence-scored trade plan builder.
@@ -387,6 +447,66 @@ python backtest_a_share_skill.py --mode rolling --top 8 --breakeven-trigger-pct 
 ```powershell
 .\run_crypto_daily_agent.ps1 --top 8
 ```
+
+### 📨 飞书 / Lark 报告推送
+
+将每日报告推送到飞书/Lark 聊天。支持两种配置模式：
+
+#### 模式A：自定义机器人 Webhook（最简单）
+
+1. 在飞书/Lark 目标群聊中创建自定义机器人
+2. 复制 webhook 地址
+3. 设置环境变量：
+
+```powershell
+# PowerShell
+$env:FEISHU_WEBHOOK_URL = "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxx"
+
+# （可选）如果机器人的步配置了签名校验：
+$env:LARK_WEBHOOK_SECRET = "your-signing-secret"
+```
+
+```bash
+# Bash / Git Bash
+export FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxxx"
+```
+
+#### 模式B：lark-cli（精确推送到指定会话或私信）
+
+```bash
+# 1. 全局安装 lark-cli
+npm install -g lark-cli
+
+# 2. 登录授权（会打开浏览器）
+lark-cli auth login
+
+# 3. 验证登录状态
+lark-cli auth status
+```
+
+然后指定推送目标（可选，不设置则自动发到自己的私信）：
+
+```powershell
+# 推送到指定群聊
+$env:LARK_CHAT_ID = "oc_xxxxx"
+
+# 或推送到指定用户的私信
+$env:LARK_USER_ID = "ou_xxxxx"
+```
+
+> **如何获取 chat/user ID**：`lark-cli auth status` 会显示你自己的 `userOpenId`。要获取群聊 ID，使用 `lark-cli im list-chats` 或在飞书/Lark 客户端中查看群信息。
+
+#### 运行联合推送管线
+
+```powershell
+# A股扫描 + 飞书推送
+.\run_a_share_daily_and_send_lark.ps1
+```
+
+脚本会：
+1. 运行 A 股扫描器生成报告
+2. 优先使用 `LARK_WEBHOOK_URL` / `FEISHU_WEBHOOK_URL`（如果设置了的话），否则回退到 `lark-cli`
+3. 将报告以文件形式发送到目标会话或私信
 
 ### 核心技术库 (`trading_strategy.py`)
 
