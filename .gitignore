@@ -42,3 +42,6 @@ reports/
 
 # Claude
 .claude/
+
+# Cache (stock-valuation skill runtime cache)
+.cache/

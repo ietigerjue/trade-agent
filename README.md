@@ -2,12 +2,12 @@
 
 # Trade Agent / 交易助手
 
-**Multi-Market Strategy Scanner · 多市场策略扫描器**
+**Multi-Market Strategy Scanner + Stock Valuation · 多市场策略扫描 + 股票估值**
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Markets](https://img.shields.io/badge/Markets-A_Share%20%7C%20US%20%7C%20Crypto-orange.svg)]()
-[![Release](https://img.shields.io/github/v/release/ietigerjue/trade-agent)](https://github.com/ietigerjue/trade-agent/releases)
+[![Modules](https://img.shields.io/badge/Modules-Trade%20Agent%20%7C%20Stock%20Valuation-blueviolet.svg)]()
 
 </div>
 
@@ -26,47 +26,54 @@
 ## 🚀 Quick Install
 
 ```bash
-# Clone the repo
 git clone https://github.com/ietigerjue/trade-agent.git
 cd trade-agent
 
-# Run any agent (Python 3.10+, zero pip dependencies)
+# --- Trade Agent: technical scanner (zero dependencies) ---
 python a_share_daily_agent.py --top 8
 python stock_daily_agent.py --top 8
 python crypto_daily_agent.py --top 8
 
-# Run rolling backtest
-python backtest_a_share_skill.py --mode rolling --top 8 --lookback-days 365 --sample-step 5
+# --- Stock Valuation: fundamental analysis ---
+pip install akshare yfinance numpy
+python stock-valuation/scripts/fetch_data.py 600519 A
+python stock-valuation/scripts/valuation_models.py <data_json_path>
 ```
 
-### Use as a Claude Code Skill
+### Use as Claude Code Skills
 
-Just tell Claude Code to clone and run it:
+**Trade Agent** — tell Claude Code to clone and run:
 
 ```
 请 clone https://github.com/ietigerjue/trade-agent 然后运行 a_share_daily_agent.py --top 8
 ```
 
-Claude Code will handle the clone, understand the tooling, and execute agents directly.
-
-Or set up a recurring daily scan:
+**Stock Valuation** — install as a skill, then just ask naturally:
 
 ```
-/loop 1d 请按顺序执行以下操作：
-1. 进入 trade-agent 目录
-2. 运行 python a_share_daily_agent.py --top 8
-3. 汇总报告要点告诉我
+对茅台进行估值
+What's AAPL's fair value?
 ```
+
+Claude Code will auto-trigger the valuation pipeline: fetch financials → run 5 models → cross-validate → output a 3-month price target range.
 
 ---
 
-<a name="english"></a>
-
 ## 📊 Overview
 
-Trade Agent is a multi-market technical analysis scanner that generates daily strategy reports for A-shares (Shanghai/Shenzhen), US stocks, and cryptocurrencies. No API keys required — all data comes from public endpoints.
+This repository contains two complementary stock analysis modules:
 
-**Core philosophy**: Scan the entire market, apply strict price-action rules, rank candidates by confidence, and produce structured Markdown reports. This is research automation, not financial advice or an execution bot.
+| Module | Type | What it does |
+|---|---|---|
+| **Trade Agent** | Technical analysis | Multi-market price-action scanner — finds trading candidates via K-line patterns, support/resistance, and momentum |
+| **Stock Valuation** | Fundamental analysis | Multi-model valuation pipeline — estimates fair value via PE/PB/PEG/DCF/Graham cross-validation |
+
+**Trade Agent** answers: *"What looks interesting right now?"*
+**Stock Valuation** answers: *"What is this stock actually worth?"*
+
+Together they provide both the tactical (entry/exit timing) and the strategic (fair value assessment) dimensions of stock analysis.
+
+---
 
 ## 🏗️ Architecture
 
@@ -81,30 +88,34 @@ trade-agent/
 ├── send_a_share_report_to_lark.py   # Lark/Feishu message delivery
 ├── a_share_watchlist.txt            # Personal watchlist (customizable)
 ├── run_*.ps1                        # PowerShell launchers
-└── reports/                         # Generated reports (gitignored)
+├── reports/                         # Generated reports (gitignored)
+│
+└── stock-valuation/                 # ★ Stock valuation skill
+    ├── SKILL.md                     # Skill definition (Claude Code auto-trigger)
+    ├── scripts/
+    │   ├── fetch_data.py            # Data fetcher (akshare + yfinance)
+    │   └── valuation_models.py      # 5-model valuation engine + cross-validation
+    └── references/
+        └── valuation-methods.md     # Detailed methodology reference
 ```
 
-## 📦 Agents
+---
 
-### A-Share Daily Agent (`a_share_daily_agent.py`) 
+## 📦 Module 1: Trade Agent (Technical Scanner)
+
+Multi-market technical analysis scanner. No API keys required — all data from public endpoints.
+
+### A-Share Daily Agent (`a_share_daily_agent.py`)
 
 Scans all liquid Shanghai/Shenzhen main-board stocks with multiple strategies:
 
 | Strategy | Description |
 |---|---|
-| **Strategy 1A** | Breakout-retest: price breaks above 30-day resistance, then retests and holds above the former resistance line |
-| **Strategy 1B** | MA30 second wave: prior run-up ≥40%, 12-55% pullback into rising MA30, bullish restart after retest holds |
+| **Strategy 1A** | Breakout-retest: price breaks above 30-day resistance, then retests and holds |
+| **Strategy 1B** | MA30 second wave: prior run-up ≥40%, 12-55% pullback into rising MA30, bullish restart |
 | **Strategy 2** | Wyckoff re-accumulation: uptrend → horizontal box → lower-edge bullish pinbar |
-| **Trend Pool** | Trend-quality stocks requiring buy/sell ratio ≥2.0x, awaiting breakout trigger |
-| **T+0 Funds** | Liquid ETFs/LOFs that typically support T+0 (cross-border/QDII/commodity/bond) |
-
-**Confidence layers**:
-- Price action (engulfing, morning star, pinbar, breakout bar quality)
-- Al Brooks-style context (trend strength, bar overlap, breakout follow-through)
-- MACD divergence (bullish/bearish)
-- Reversal structures (double/triple bottom, inverse H&S, rounding bottom, V-bottom)
-- Sector/industry strength resonance
-- Community sentiment (Eastmoney Guba discussion analysis)
+| **Trend Pool** | Trend-quality stocks with buy/sell ratio ≥2.0x, awaiting breakout trigger |
+| **T+0 Funds** | Liquid ETFs/LOFs that support T+0 (cross-border/QDII/commodity/bond) |
 
 ```powershell
 .\run_a_share_daily_agent.ps1 --top 8 --min-amount 80000000
@@ -112,24 +123,22 @@ Scans all liquid Shanghai/Shenzhen main-board stocks with multiple strategies:
 
 ### A-Share Backtest (`backtest_a_share_skill.py`)
 
-Two modes:
-
 ```powershell
 # Slice mode — single historical date
-python .\backtest_a_share_skill.py --top 8 --days-ago 30 --hold-days 10
+python backtest_a_share_skill.py --top 8 --days-ago 30 --hold-days 10
 
-# Rolling mode — multiple signal dates with factor attribution
-python .\backtest_a_share_skill.py --mode rolling --top 8 --lookback-days 365 --sample-step 5 --hold-days-list 5,10,20
+# Rolling mode — multi-date with factor attribution
+python backtest_a_share_skill.py --mode rolling --top 8 --lookback-days 365 --sample-step 5 --hold-days-list 5,10,20
 
 # Breakeven stop testing
-python .\backtest_a_share_skill.py --mode rolling --top 8 --breakeven-trigger-pct 8
+python backtest_a_share_skill.py --mode rolling --top 8 --breakeven-trigger-pct 8
 ```
 
-Measures: return, MFE/MAE, structure stop hits, breakeven stop hits, target hits, HS300 excess return, factor group attribution.
+Measures: return, MFE/MAE, stop hits, target hits, HS300 excess return, factor group attribution.
 
 ### 10-Day Signal Review (`review_a_share_10day_signals.py`)
 
-Reviews strict candidates from 10 days ago using the same execution discipline as the backtest: signal day is NOT an entry; entry only after next-session retest confirmation.
+Reviews strict candidates from 10 days ago with execution discipline: signal day ≠ entry day.
 
 ```powershell
 .\run_a_share_10day_signal_review.ps1 --days-ago 10
@@ -137,7 +146,7 @@ Reviews strict candidates from 10 days ago using the same execution discipline a
 
 ### US Stock Agent (`stock_daily_agent.py`)
 
-Scans ~80 liquid US stocks via Nasdaq public API. Ranks by long/short pattern scores using moving-average structure, breakout levels, MACD, RSI, momentum, and volume.
+Scans ~80 liquid US stocks via Nasdaq public API. Ranks by long/short pattern scores.
 
 ```powershell
 .\run_stock_daily_agent.ps1 --top 8
@@ -145,32 +154,98 @@ Scans ~80 liquid US stocks via Nasdaq public API. Ranks by long/short pattern sc
 
 ### Crypto Agent (`crypto_daily_agent.py`)
 
-Uses Coinbase public endpoints. Heat score combines liquidity, turnover, multi-timeframe momentum, and market-cap rank. Generates 15m/1h/4h trade plans.
+Coinbase public endpoints. Heat score + multi-timeframe trade plans (15m/1h/4h).
 
 ```powershell
 .\run_crypto_daily_agent.ps1 --top 8
 ```
 
-### Lark/Feishu Report Delivery
+### Core Library (`trading_strategy.py`)
 
-```powershell
-.\run_a_share_daily_and_send_lark.ps1
+Pure Python, stdlib only: `Candle` / `TradePlan` dataclasses, EMA/MACD/RSI/SMA, support/resistance detection, candlestick patterns (engulfing, morning star, piercing, double top), MACD divergence, higher-low detection, risk/reward calculation, confidence-scored trade plan builder.
+
+---
+
+## 📦 Module 2: Stock Valuation (Fundamental Analysis)
+
+A rigorous multi-model valuation pipeline. Install as a Claude Code skill and trigger with natural language, or run the scripts directly.
+
+### How it works
+
+```
+User: "对茅台进行估值"
+  │
+  ├─ Phase 1: Identify stock (code + market)
+  ├─ Phase 2: Parallel data gathering
+  │   ├─ Financial data (akshare / yfinance)
+  │   ├─ News sentiment (WebSearch)
+  │   └─ Industry context (WebSearch)
+  ├─ Phase 3: Run 5 valuation models in parallel
+  │   ├─ PE Relative  → fair price = EPS × industry median PE
+  │   ├─ PB Relative  → fair price = BPS × industry median PB
+  │   ├─ PEG          → fair PE = earnings growth rate
+  │   ├─ DCF Simplified → 3yr FCF projection + terminal value
+  │   └─ Graham       → V = √(22.5 × EPS × BVPS)
+  ├─ Phase 4: Cross-validate
+  │   ├─ Outlier detection (2×MAD or >30% from median)
+  │   ├─ Core range (median ±1.5×MAD, capped at ±25%)
+  │   ├─ Sentiment adjustment (±5%)
+  │   └─ 3-month projection (20% convergence + buffer)
+  └─ Output: Structured valuation report
 ```
 
-Set `LARK_WEBHOOK_URL` or `LARK_CHAT_ID` before use.
+### Quick start (standalone)
 
-## 🔧 Core Library (`trading_strategy.py`)
+```bash
+pip install akshare yfinance numpy
 
-Pure Python, no dependencies beyond stdlib:
+# Fetch financial data
+python stock-valuation/scripts/fetch_data.py 600519 A    # 茅台
+python stock-valuation/scripts/fetch_data.py AAPL US     # Apple
 
-- `Candle` / `TradePlan` data classes (frozen, type-safe)
-- EMA, MACD, RSI, SMA indicators
-- Support/resistance detection
-- Candlestick patterns: bullish/bearish engulfing, morning star, bearish piercing, double/multiple top
-- MACD divergence (bullish/bearish)
-- Higher low detection
-- Risk/reward calculation
-- Confidence-scored trade plan builder
+# Run valuation models
+python stock-valuation/scripts/valuation_models.py <data_json_path>
+```
+
+The valuation engine outputs a JSON with individual model results, cross-validation stats, and a 3-month price target range (`target_low` / `target_high`).
+
+### Quick start (Claude Code skill)
+
+Install `stock-valuation/` as a Claude Code skill, then just ask naturally. The skill auto-triggers on phrases like "估值", "目标价", "fair value", "target price", "undervalued/overvalued".
+
+### Models
+
+| Model | Formula | Best for | Limitations |
+|---|---|---|---|
+| **PE Relative** | Fair Price = EPS × Industry Median PE | Mature, profitable companies | Skip if negative EPS |
+| **PB Relative** | Fair Price = BPS × Industry Median PB | Financials, asset-heavy | Skip if no industry PB |
+| **PEG** | Fair PE = Earnings Growth Rate | Growth companies | Skip if negative growth |
+| **DCF Simplified** | 3yr FCF + Terminal Value − Net Debt | Any with positive FCF | Sensitive to WACC/g assumptions |
+| **Graham** | V = √(22.5 × EPS × BVPS) | Value stocks | Often conservative for growth |
+
+Models that don't apply are skipped with a reason. Results are cross-validated: outliers (>2×MAD from median) are flagged and excluded from the core range.
+
+### Consensus strength
+
+| Strength | Model spread | Meaning |
+|---|---|---|
+| 🟢 Strong | < 20% | Models agree well — higher confidence |
+| 🟡 Moderate | 20–50% | Reasonable disagreement — use with caution |
+| 🔴 Weak | ≥ 50% | Models diverge significantly — low confidence |
+
+---
+
+## ⚠️ Disclaimer
+
+This project is for **research and educational purposes only**. It does NOT constitute financial advice. All strategy signals and valuation outputs are based on historical data and public information — they do not predict future performance. Trading involves risk. Invest responsibly.
+
+---
+
+<div align="center">
+
+**Market research automation — not financial advice or an execution bot.**
+
+</div>
 
 ---
 
@@ -179,43 +254,54 @@ Pure Python, no dependencies beyond stdlib:
 ## 🚀 安装使用
 
 ```bash
-# 克隆仓库
 git clone https://github.com/ietigerjue/trade-agent.git
 cd trade-agent
 
-# 运行任一扫描器（需要 Python 3.10+，零依赖）
+# --- Trade Agent：技术扫描器（零依赖）---
 python a_share_daily_agent.py --top 8
 python stock_daily_agent.py --top 8
 python crypto_daily_agent.py --top 8
 
-# 运行滚动回测
-python backtest_a_share_skill.py --mode rolling --top 8 --lookback-days 365 --sample-step 5
+# --- Stock Valuation：基本面估值 ---
+pip install akshare yfinance numpy
+python stock-valuation/scripts/fetch_data.py 600519 A
+python stock-valuation/scripts/valuation_models.py <data_json_path>
 ```
 
 ### 作为 Claude Code Skill 使用
 
-直接告诉 Claude Code 克隆并运行：
+**Trade Agent** — 告诉 Claude Code 克隆并运行：
 
 ```
 请 clone https://github.com/ietigerjue/trade-agent 然后运行 a_share_daily_agent.py --top 8
 ```
 
-Claude Code 会自动 clone 仓库、理解工具用法并执行扫描器。
-
-设置定时扫描：
+**Stock Valuation** — 安装为 skill 后直接用自然语言提问：
 
 ```
-/loop 1d 请按顺序执行以下操作：
-1. 进入 trade-agent 目录
-2. 运行 python a_share_daily_agent.py --top 8
-3. 汇总报告要点告诉我
+对茅台进行估值
+AAPL 现在高估还是低估？
 ```
+
+Claude Code 会自动触发估值流程：爬取财报 → 运行5个模型 → 交叉验证 → 输出三个月目标价区间。
+
+---
 
 ## 📊 概述
 
-Trade Agent 是一个多市场技术分析扫描器，每日自动生成 A 股（沪深主板）、美股和加密货币的策略报告。无需 API 密钥——所有数据来自公开接口。
+本仓库包含两个互补的股票分析模块：
 
-**核心理念**：全市场扫描，严格按价格行为规则筛选，按置信度排序，产出结构化 Markdown 报告。这是研究自动化工具，不是投资建议或自动交易机器人。
+| 模块 | 类型 | 功能 |
+|---|---|---|
+| **Trade Agent** | 技术分析 | 多市场裸K价格行为扫描 — 通过K线形态、支撑/阻力、动量寻找交易候选 |
+| **Stock Valuation** | 基本面分析 | 多模型估值流程 — 通过PE/PB/PEG/DCF/Graham交叉验证估算合理价值 |
+
+**Trade Agent** 回答：*"现在什么标的看起来有意思？"*
+**Stock Valuation** 回答：*"这只股票到底值多少钱？"*
+
+两者结合，覆盖战术层面（入场/出场时机）和战略层面（合理估值判断）。
+
+---
 
 ## 🏗️ 项目架构
 
@@ -230,10 +316,22 @@ trade-agent/
 ├── send_a_share_report_to_lark.py   # 飞书/Lark 报告推送
 ├── a_share_watchlist.txt            # 个人自选股（可自定义）
 ├── run_*.ps1                        # PowerShell 启动脚本
-└── reports/                         # 生成的报告（已 gitignore）
+├── reports/                         # 生成的报告（已 gitignore）
+│
+└── stock-valuation/                 # ★ 股票估值 skill
+    ├── SKILL.md                     # Skill 定义（Claude Code 自动触发）
+    ├── scripts/
+    │   ├── fetch_data.py            # 数据爬取（akshare + yfinance）
+    │   └── valuation_models.py      # 5模型估值引擎 + 交叉验证
+    └── references/
+        └── valuation-methods.md     # 估值方法论参考文档
 ```
 
-## 📦 各模块说明
+---
+
+## 📦 模块一：Trade Agent（技术扫描器）
+
+多市场技术分析扫描器。无需 API 密钥 — 所有数据来自公开接口。
 
 ### A股日线扫描器 (`a_share_daily_agent.py`)
 
@@ -247,34 +345,24 @@ trade-agent/
 | **趋势观察池** | 趋势质量达标（60日买卖盘≥2.0x），等待裸K触发 |
 | **T+0基金** | 跨境/QDII/商品/债券类流动性ETF/LOF，按策略一筛选 |
 
-**置信度层次**：
-- 价格行为（吞没、启明星、Pinbar、突破K线质量）
-- Al Brooks 上下文（趋势强度、K线重叠率、突破跟进）
-- MACD背离（底背离/顶背离）
-- 反转结构（双底/三重底/头肩底/圆弧底/V底）
-- 板块/行业强度共振
-- 社区情绪（东方财富股吧讨论分析）
-
 ```powershell
 .\run_a_share_daily_agent.ps1 --top 8 --min-amount 80000000
 ```
 
 ### A股回测引擎 (`backtest_a_share_skill.py`)
 
-两种模式：
-
 ```powershell
 # 切片回测 — 单个历史日期
-python .\backtest_a_share_skill.py --top 8 --days-ago 30 --hold-days 10
+python backtest_a_share_skill.py --top 8 --days-ago 30 --hold-days 10
 
 # 滚动回测 — 多信号日 + 因子归因
-python .\backtest_a_share_skill.py --mode rolling --top 8 --lookback-days 365 --sample-step 5 --hold-days-list 5,10,20
+python backtest_a_share_skill.py --mode rolling --top 8 --lookback-days 365 --sample-step 5 --hold-days-list 5,10,20
 
 # 保本止损测试
-python .\backtest_a_share_skill.py --mode rolling --top 8 --breakeven-trigger-pct 8
+python backtest_a_share_skill.py --mode rolling --top 8 --breakeven-trigger-pct 8
 ```
 
-测量指标：收益率、MFE/MAE、结构止损触发率、保本止损触发率、目标触达率、沪深300超额收益、因子分组归因。
+测量指标：收益率、MFE/MAE、止损触发率、目标触达率、沪深300超额收益、因子分组归因。
 
 ### 10日信号复盘 (`review_a_share_10day_signals.py`)
 
@@ -294,42 +382,90 @@ python .\backtest_a_share_skill.py --mode rolling --top 8 --breakeven-trigger-pc
 
 ### 加密货币扫描器 (`crypto_daily_agent.py`)
 
-使用 Coinbase 公开接口。热度评分综合流动性、换手率、多周期动量和市值排名。生成 15分钟/1小时/4小时交易计划。
+使用 Coinbase 公开接口。热度评分综合流动性、换手率、多周期动量和市值排名。
 
 ```powershell
 .\run_crypto_daily_agent.ps1 --top 8
 ```
 
-### 飞书/Lark 报告推送
+### 核心技术库 (`trading_strategy.py`)
 
-```powershell
-.\run_a_share_daily_and_send_lark.ps1
+纯 Python，仅依赖标准库：`Candle` / `TradePlan` 数据类、EMA/MACD/RSI/SMA、支撑/阻力位检测、K线形态识别（吞没、启明星、刺穿、双顶）、MACD背离、低点抬高检测、盈亏比计算、置信度评分交易计划构建器。
+
+---
+
+## 📦 模块二：Stock Valuation（基本面估值）
+
+严谨的多模型估值流程。安装为 Claude Code skill 后可用自然语言触发，也可直接运行脚本。
+
+### 工作流程
+
+```
+用户："对茅台进行估值"
+  │
+  ├─ 阶段1：识别股票（代码 + 市场）
+  ├─ 阶段2：并行数据采集
+  │   ├─ 财务数据（akshare / yfinance）
+  │   ├─ 新闻情绪（WebSearch）
+  │   └─ 行业背景（WebSearch）
+  ├─ 阶段3：并行运行5个估值模型
+  │   ├─ PE相对估值 → 合理价 = EPS × 行业中位数PE
+  │   ├─ PB相对估值 → 合理价 = BPS × 行业中位数PB
+  │   ├─ PEG模型    → 合理PE = 盈利增长率
+  │   ├─ 简化DCF    → 3年FCF预测 + 终值
+  │   └─ 格雷厄姆   → V = √(22.5 × EPS × BVPS)
+  ├─ 阶段4：交叉验证
+  │   ├─ 离群值检测（偏离中位数>2×MAD或>30%）
+  │   ├─ 核心区间（中位数 ±1.5×MAD，区间上限±25%）
+  │   ├─ 情绪修正（±5%）
+  │   └─ 三个月预测（20%收敛 + 缓冲）
+  └─ 输出：结构化估值报告
 ```
 
-使用前需配置 `LARK_WEBHOOK_URL` 或 `LARK_CHAT_ID`。
+### 独立运行
 
-## 🔧 核心技术库 (`trading_strategy.py`)
+```bash
+pip install akshare yfinance numpy
 
-纯 Python，仅依赖标准库：
+# 获取财务数据
+python stock-valuation/scripts/fetch_data.py 600519 A    # 茅台
+python stock-valuation/scripts/fetch_data.py AAPL US     # 苹果
 
-- `Candle` / `TradePlan` 数据类（不可变、类型安全）
-- EMA、MACD、RSI、SMA 技术指标
-- 支撑/阻力位检测
-- K线形态：看涨/看跌吞没、启明星、看跌刺穿、双顶/多重顶
-- MACD 背离（底背离/顶背离）
-- 低点抬高检测
-- 盈亏比计算
-- 置信度评分的交易计划构建器
+# 运行估值模型
+python stock-valuation/scripts/valuation_models.py <data_json_path>
+```
+
+估值引擎输出 JSON，包含各模型结果、交叉验证统计和三个月目标价区间（`target_low` / `target_high`）。
+
+### 模型说明
+
+| 模型 | 公式 | 适用场景 | 局限 |
+|---|---|---|---|
+| **PE相对估值** | 合理价 = EPS × 行业中位数PE | 成熟盈利公司 | 亏损公司跳过 |
+| **PB相对估值** | 合理价 = BPS × 行业中位数PB | 金融/重资产 | 无行业PB时跳过 |
+| **PEG** | 合理PE = 盈利增长率 | 成长型公司 | 负增长跳过 |
+| **简化DCF** | 3年FCF + 终值 − 净债务 | 正FCF公司 | 对WACC/g敏感 |
+| **格雷厄姆** | V = √(22.5 × EPS × BVPS) | 价值股 | 对成长股偏保守 |
+
+不适用的模型会跳过并说明原因。结果经交叉验证：偏离中位数>2×MAD的离群值被标记并排除在核心区间外。
+
+### 一致性强度
+
+| 强度 | 模型离散度 | 含义 |
+|---|---|---|
+| 🟢 强 | < 20% | 模型一致性好 — 置信度较高 |
+| 🟡 中等 | 20–50% | 合理分歧 — 谨慎参考 |
+| 🔴 弱 | ≥ 50% | 模型分歧大 — 置信度低 |
+
+---
 
 ## ⚠️ 免责声明
 
-本项目仅用于研究和教育目的。不构成投资建议。所有策略信号均为历史数据的技术形态分析，不代表未来收益。交易有风险，入市需谨慎。
+本项目仅用于**研究和教育目的**，不构成投资建议。所有策略信号和估值结果均基于历史数据和公开信息，不代表未来收益。交易有风险，入市需谨慎。
 
 ---
 
 <div align="center">
-
-**This is market research automation, not financial advice or an execution bot.**
 
 **这是市场研究自动化工具，不是投资建议或自动交易机器人。**
 
