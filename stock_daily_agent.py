@@ -28,7 +28,7 @@ from trading_strategy import Candle, TradePlan, build_trade_plan, risk_reward
 
 NASDAQ_HISTORICAL_URL = "https://api.nasdaq.com/api/quote/{symbol}/historical"
 NASDAQ_INFO_URL = "https://api.nasdaq.com/api/quote/{symbol}/info"
-DEFAULT_REPORT_DIR = "reports"
+DEFAULT_REPORT_DIR = "F:/VibeCoding/Codex和ClaudeCode/Memory Base/03_Skill产物/trade-agent/reports/stocks/daily"
 DEFAULT_UNIVERSE = [
     "AAPL",
     "MSFT",

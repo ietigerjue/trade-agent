@@ -382,7 +382,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Review strict candidates from an earlier A-share daily report.")
     parser.add_argument("--days-ago", type=int, default=10)
     parser.add_argument("--as-of", default=None, help="Review date, YYYY-MM-DD. Default: today.")
-    parser.add_argument("--report-dir", default=agent.DEFAULT_REPORT_DIR)
+    parser.add_argument("--source-report-dir", default=agent.DEFAULT_REPORT_DIR)
+    parser.add_argument(
+        "--report-dir",
+        default="F:/VibeCoding/Codex和ClaudeCode/Memory Base/03_Skill产物/trade-agent/reports/a-share/signal-reviews",
+    )
     parser.add_argument("--workers", type=int, default=24)
     parser.add_argument("--min-buy-sell-ratio", type=float, default=2.0)
     parser.add_argument("--tolerance-days", type=int, default=5)
@@ -390,8 +394,9 @@ def main() -> int:
 
     as_of = parse_date(args.as_of)
     target_date = as_of - dt.timedelta(days=args.days_ago)
+    source_report_dir = Path(args.source_report_dir)
     report_dir = Path(args.report_dir)
-    source_report = find_source_report(report_dir, target_date, args.tolerance_days)
+    source_report = find_source_report(source_report_dir, target_date, args.tolerance_days)
     signal_date = report_date(source_report) or target_date
     selected = parse_strict_candidates(source_report)
 

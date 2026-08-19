@@ -654,7 +654,10 @@ def main() -> int:
     )
     parser.add_argument("--lookback-days", type=int, default=365)
     parser.add_argument("--sample-step", type=int, default=5)
-    parser.add_argument("--report-dir", default=agent.DEFAULT_REPORT_DIR)
+    parser.add_argument(
+        "--report-dir",
+        default="F:/VibeCoding/Codex和ClaudeCode/Memory Base/03_Skill产物/trade-agent/reports/a-share/backtests",
+    )
     args = parser.parse_args()
 
     if args.mode == "rolling":

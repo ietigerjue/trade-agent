@@ -28,7 +28,7 @@ from trading_strategy import Candle, TradePlan, build_trade_plan, risk_reward
 COINBASE_API_BASE = "https://api.coinbase.com/v2"
 COINBASE_EXCHANGE_BASE = "https://api.exchange.coinbase.com"
 DEFAULT_VS_CURRENCY = "usd"
-DEFAULT_REPORT_DIR = "reports"
+DEFAULT_REPORT_DIR = "F:/VibeCoding/Codex和ClaudeCode/Memory Base/03_Skill产物/trade-agent/reports/crypto/daily"
 STABLE_SYMBOLS = {
     "usdt",
     "usdc",

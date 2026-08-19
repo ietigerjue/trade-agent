@@ -14,6 +14,7 @@ import datetime as dt
 import html
 import json
 import math
+import os
 import re
 import socket
 import sys
@@ -26,6 +27,16 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from trading_strategy import (  # 2026-06-04 裸 K risk/reward 规则
+    Bar,
+    FixedStopRR,
+    compute_fixed_stop_rr,
+    format_rr_lark_line,
+    format_rr_markdown_row,
+    higher_low,
+    rank_best_long_candidates,
+)
+
 
 SINA_QUOTE_URL = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData"
 SINA_KLINE_URL = "https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketData.getKLineData"
@@ -35,8 +46,9 @@ EASTMONEY_QUOTE_URL = "https://push2.eastmoney.com/api/qt/clist/get"
 EASTMONEY_GUBA_URL = "https://guba.eastmoney.com/list,{code},f_1.html"
 CFI_QUOTE_URL = "https://quote.cfi.cn/quote_{code}.html"
 CFI_SECTION_URL = "https://quote.cfi.cn/quote.aspx"
-DEFAULT_REPORT_DIR = "reports"
+DEFAULT_REPORT_DIR = "F:/VibeCoding/Codex和ClaudeCode/Memory Base/03_Skill产物/trade-agent/reports/a-share/daily"
 DEFAULT_T0_FUND_MIN_AMOUNT = 50_000_000
+SKIP_EXTERNAL_CONTEXT = os.environ.get("A_SHARE_SKIP_EXTERNAL_CONTEXT") == "1"
 STRATEGY2_BOX_DAYS = 20
 T0_FUND_FS = "b:MK0021,b:MK0022,b:MK0023,b:MK0024"
 T0_FUND_KEYWORDS = (
@@ -86,16 +98,6 @@ def _prefer_ipv4_for_eastmoney(host: str, port: int, family: int = 0, type: int 
 
 
 socket.getaddrinfo = _prefer_ipv4_for_eastmoney
-
-
-@dataclass(frozen=True)
-class Bar:
-    date: str
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
 
 
 @dataclass(frozen=True)
@@ -201,18 +203,18 @@ class TrendCandidate:
 
 
 @dataclass(frozen=True)
-class WyckoffCandidate:
+class RangeBoundCandidate:
     code: str
     name: str
     date: str
     close: float
     pct_change: float | None
     amount: float
-    box_low: float
-    box_high: float
-    box_days: int
-    box_position: float
-    prior_runup: float
+    range_low: float
+    range_high: float
+    range_days: int
+    range_position: float
+    range_width_pct: float
     gain_30: float
     gain_60: float
     buy_sell_ratio_60: float
@@ -223,6 +225,7 @@ class WyckoffCandidate:
     confidence_factors: list[str]
     bearish_confidence: float
     bearish_factors: list[str]
+    lower_edge_signals: list[str]
     industry: SectionStrength | None = None
     concepts: list[SectionStrength] | None = None
     community: CommunitySignal | None = None
@@ -869,7 +872,7 @@ def retest_hold_signal(bar: Bar, level: float) -> bool:
     )
 
 
-def recent_ma30_second_wave(
+def recent_ema20_second_wave(
     bars: list[Bar],
     closes: list[float],
     volumes: list[float],
@@ -879,17 +882,17 @@ def recent_ma30_second_wave(
         return False, None, None, None, []
 
     current = bars[-1]
-    ma30_now = sma(closes, 30)
+    ema20_now = ema_series(closes, 20)[-1]
     ma60_now = sma(closes, 60)
-    ma30_before = sma(closes[:-5], 30) if len(closes) > 65 else None
-    if ma30_now is None or ma60_now is None or ma30_before is None:
+    ema20_before = ema_series(closes[:-5], 20)[-1] if len(closes) > 65 else None
+    if ema20_now is None or ma60_now is None or ema20_before is None:
         return False, None, None, None, []
 
     volume_base = max(avg(volumes[-21:-1]), 1)
     recent_high = max((bar.high for bar in bars[-6:-1]), default=current.high)
     launch_bar = (
         current.close > current.open
-        and current.close > ma30_now * 1.02
+        and current.close > ema20_now * 1.02
         and (current.volume >= volume_base * 1.1 or current.close >= recent_high * 0.995)
     )
     if not launch_bar:
@@ -897,9 +900,9 @@ def recent_ma30_second_wave(
 
     for index in range(max(65, len(bars) - lookback_days), len(bars)):
         retest_bar = bars[index]
-        ma30_at_retest = sma(closes[: index + 1], 30)
+        ema20_at_retest = ema_series(closes[: index + 1], 20)[-1]
         ma60_at_retest = sma(closes[: index + 1], 60)
-        if ma30_at_retest is None or ma60_at_retest is None:
+        if ema20_at_retest is None or ma60_at_retest is None:
             continue
 
         pre_window = bars[max(0, index - 90) : index]
@@ -910,23 +913,23 @@ def recent_ma30_second_wave(
         prior_high = max(bar.high for bar in pre_window)
         prior_runup = pct_change(prior_high, prior_low)
         pullback_pct = ((prior_high - retest_bar.low) / max(prior_high, 1e-9)) * 100
-        touched_ma30 = retest_bar.low <= ma30_at_retest * 1.04
-        held_ma30 = retest_bar.close >= ma30_at_retest * 0.985
+        touched_ema20 = retest_bar.low <= ema20_at_retest * 1.04
+        held_ema20 = retest_bar.close >= ema20_at_retest * 0.985
         post_retest_holds = True
         for offset in range(index, len(bars)):
-            ma30_at_offset = sma(closes[: offset + 1], 30)
-            if ma30_at_offset is not None and bars[offset].close < ma30_at_offset * 0.985:
+            ema20_at_offset = ema_series(closes[: offset + 1], 20)[-1]
+            if ema20_at_offset is not None and bars[offset].close < ema20_at_offset * 0.985:
                 post_retest_holds = False
                 break
 
         if not (
             prior_runup >= 40
             and 12 <= pullback_pct <= 55
-            and touched_ma30
-            and held_ma30
+            and touched_ema20
+            and held_ema20
             and post_retest_holds
-            and ma30_at_retest >= ma60_at_retest
-            and ma30_now >= ma30_before * 0.99
+            and ema20_at_retest >= ma60_at_retest
+            and ema20_now >= ema20_before * 0.99
             and current.close <= prior_high * 1.35
         ):
             continue
@@ -935,15 +938,248 @@ def recent_ma30_second_wave(
         factors = [
             f"前段涨幅{prior_runup:.0f}%",
             f"前高回撤{pullback_pct:.0f}%",
-            "回踩MA30不破",
+            "回踩EMA20不破",
         ]
         if current.volume >= volume_base * 1.1:
             factors.append(f"二波放量启动({current.volume / volume_base:.1f}x)")
         else:
             factors.append("二波右侧启动")
-        return True, ma30_at_retest, retest_bar.date, measured_target, factors
+        return True, ema20_at_retest, retest_bar.date, measured_target, factors
 
     return False, None, None, None, []
+
+
+def detect_ema20_breakout(
+    bars: list[Bar],
+    closes: list[float],
+    volumes: list[float],
+) -> tuple[bool, float | None, str | None, list[str]]:
+    if len(bars) < 35:
+        return False, None, None, []
+    current = bars[-1]
+    previous = bars[-2]
+    ema20 = ema_series(closes, 20)[-1]
+    if ema20 is None:
+        return False, None, None, []
+    volume_base = max(avg(volumes[-21:-1]), 1)
+    if not (
+        current.close > ema20 * 1.005
+        and previous.close <= ema20 * 1.005
+        and current.volume >= volume_base * 1.15
+    ):
+        return False, None, None, []
+    return True, ema20, current.date, ["放量突破EMA20"]
+
+
+def detect_descending_channel_breakout(
+    bars: list[Bar],
+    closes: list[float],
+    volumes: list[float],
+) -> tuple[bool, float | None, str | None, list[str]]:
+    """检测趋势早期信号D：涨停大阳线突破持续20根K线以上的下降通道，且收盘在EMA20上方。
+
+    条件：
+    1. 当日涨幅 >= 9.5%（A股主板涨停板附近），且为实体大阳线（收盘接近最高价）
+    2. 最近60根K线（不含当日）中存在至少3个持续下降的摆荡高点，构成下降通道
+    3. 通道至少持续20根K线
+    4. 涨停K线最高价突破通道上轨的延伸线
+    5. 收盘价在EMA20上方
+    """
+    if len(bars) < 65:
+        return False, None, None, []
+
+    current = bars[-1]
+    previous = bars[-2]
+
+    # 1. 涨停大阳线检查（A股主板 ±10% 涨跌停）
+    # B2 fix: 必须先确认是阳线（close > open），
+    # abs(close-open) 会让阴线也通过"实体大阳线"门槛。
+    if current.close <= current.open:
+        return False, None, None, []
+    pct_chg = (current.close - previous.close) / max(previous.close, 1e-9) * 100
+    if pct_chg < 9.5:
+        return False, None, None, []
+
+    # 确认是实体大阳线（收盘在高位，上影线短）
+    trading_range = max(current.high - current.low, 1e-9)
+    body = current.close - current.open  # 已经保证 close > open
+    upper_shadow = current.high - current.close  # close >= open，high 之上的才是上影
+    if body / trading_range < 0.55:
+        return False, None, None, []
+    if upper_shadow > trading_range * 0.25:
+        return False, None, None, []
+
+    # 2. 下降通道检测：在最近60根K线（不含今日）中找摆荡高点
+    window_size = min(60, len(bars) - 1)
+    window = bars[-window_size - 1 : -1]
+
+    swing_highs = indexed_swing_highs(window, left=3, right=3)
+    if len(swing_highs) < 3:
+        return False, None, None, []
+
+    # 取最近3-4个摆荡高点，检查是否持续下降
+    recent_highs = swing_highs[-4:] if len(swing_highs) >= 4 else swing_highs[-3:]
+    high_values = [h[2] for h in recent_highs]
+
+    descending = all(
+        high_values[i] > high_values[i + 1] * 1.003 for i in range(len(high_values) - 1)
+    )
+    if not descending:
+        return False, None, None, []
+
+    # 通道至少持续20根K线
+    channel_start_idx = recent_highs[0][0]
+    channel_end_idx = recent_highs[-1][0]
+    channel_duration = channel_end_idx - channel_start_idx
+    if channel_duration < 20:
+        return False, None, None, []
+
+    # 3. 计算通道上轨在当前bar的延伸位置，确认突破
+    h1 = recent_highs[-2]
+    h2 = recent_highs[-1]
+    h1_idx, h1_val = h1[0], h1[2]
+    h2_idx, h2_val = h2[0], h2[2]
+
+    h_gap = max(h2_idx - h1_idx, 1)
+    slope = (h2_val - h1_val) / h_gap
+
+    # B3 fix: 拒绝异常陡峭的负斜率（上轨失真 → 任意涨停都能"突破"）。
+    # slope 已是每根 K 线的价格变化，不应再除以 h_gap。
+    # 合理区间：下降通道上轨每 K 线跌幅不宜超过 0.8%。
+    if slope < -h1_val * 0.008:
+        return False, None, None, []
+
+    current_idx_in_window = len(window)
+    channel_top = h2_val + slope * (current_idx_in_window - h2_idx)
+
+    # B3 fix: 校验今日是首次突破。h2 后到昨日的任一 K 线如果曾越过
+    # 当日延伸上轨，说明突破早已发生；即使昨日回到轨内也不应重复标记。
+    for bar_idx in range(h2_idx + 1, current_idx_in_window):
+        projected_top = h2_val + slope * (bar_idx - h2_idx)
+        if window[bar_idx].high > projected_top:
+            return False, None, None, []
+
+    if current.high <= channel_top:
+        return False, None, None, []
+
+    # 4. 收盘在EMA20上方
+    ema20 = ema_series(closes, 20)[-1]
+    if ema20 is None:
+        return False, None, None, []
+    if current.close <= ema20:
+        return False, None, None, []
+
+    # 5. 成交量确认
+    volume_base = max(avg(volumes[-21:-1]), 1)
+    vol_ratio = current.volume / volume_base
+
+    # B1 fix: 信号键必须使用稳定字符串（与 price_action_rank_score 权重表精确匹配）。
+    # 动态数值（涨幅%、量比）记录在因子中供报告展示，不参与信号权重查找。
+    factors = [
+        "涨停突破下降通道",
+        f"通道持续{channel_duration}根K线",
+        "收盘站上EMA20",
+    ]
+    if vol_ratio >= 1.5:
+        factors.append("放量涨停")
+        factors.append(f"量比{vol_ratio:.1f}x")
+    elif vol_ratio >= 1.2:
+        factors.append("放量配合")
+        factors.append(f"量比{vol_ratio:.1f}x")
+
+    # 涨幅信息单独记录（供报告展示，不参与权重匹配）
+    factors.append(f"当日涨幅+{pct_chg:.1f}%")
+
+    return True, channel_top, current.date, factors
+
+
+def detect_50pct_retracement(
+    bars: list[Bar],
+    closes: list[float],
+    volumes: list[float],
+) -> tuple[bool, float | None, str | None, list[str]]:
+    """检测回踩 50% 回调位 — 策略一优先信号。
+
+    从最近一段显著上升趋势中识别波段低点和高点，
+    计算 50% 回撤位，判断当前价格是否回踩该位置并出现多头支撑信号。
+    """
+    if len(bars) < 90:
+        return False, None, None, []
+
+    current = bars[-1]
+    window = bars[-90:]
+
+    highs = indexed_swing_highs(window, left=3, right=3)
+    lows = indexed_swing_lows(window, left=3, right=3)
+
+    if len(highs) < 1 or len(lows) < 1:
+        return False, None, None, []
+
+    # 最近 90 根 K 线内的最高摆荡高点
+    recent_high = max(highs, key=lambda h: h[2])
+    high_idx, high_date, high_price = recent_high
+
+    # 该高点之前至少 10 根 K 线的波段低点
+    prior_lows = [l for l in lows if l[0] < high_idx - 10]
+    if not prior_lows:
+        return False, None, None, []
+
+    prior_low = min(prior_lows, key=lambda l: l[2])
+    low_idx, low_date, low_price = prior_low
+
+    # 上升波段至少 15% 涨幅才有意义的回调
+    runup_pct = pct_change(high_price, low_price)
+    if runup_pct < 15:
+        return False, None, None, []
+
+    # 50% 回撤位
+    retrace_50 = low_price + (high_price - low_price) * 0.5
+
+    # 当前价格需在 50% 位 ±3.5% 范围内
+    deviation = (current.close - retrace_50) / max(retrace_50, 1e-9)
+    if abs(deviation) > 0.035:
+        return False, None, None, []
+
+    # 回调幅度在上升波段的 30%-70% 之间
+    pullback_ratio = (high_price - current.close) / max(high_price - low_price, 1e-9)
+    if pullback_ratio < 0.30 or pullback_ratio > 0.70:
+        return False, None, None, []
+
+    # 多头支撑信号
+    factors: list[str] = []
+
+    if current.close > current.open:
+        if current.close > current.open * 1.02:
+            factors.append("50%位实体阳线")
+        else:
+            factors.append("50%位收阳")
+    elif bullish_pinbar(current):
+        factors.append("50%位Pinbar")
+    elif higher_low(bars[-5:], closes[-5:]):
+        factors.append("50%位higher_low")
+    else:
+        return False, None, None, []
+
+    # 成交量确认
+    volume_base = max(avg(volumes[-21:-1]), 1)
+    if current.volume >= volume_base * 0.85:
+        factors.append("50%位放量")
+
+    # 近 5 日最低价不能显著跌破 50% 位
+    recent_5_lows = [bar.low for bar in bars[-5:]]
+    if min(recent_5_lows) < retrace_50 * 0.965:
+        return False, None, None, []
+
+    # EMA20 位置辅助判断
+    ema20 = ema_series(closes, 20)[-1]
+    if ema20 is not None:
+        if current.close > ema20:
+            factors.append("站上EMA20")
+        elif current.close > ema20 * 0.97:
+            factors.append("靠近EMA20")
+
+    factors.insert(0, f"50%回调{retrace_50:.2f}")
+    return True, retrace_50, current.date, factors
 
 
 def candle_close_position(bar: Bar) -> float:
@@ -964,15 +1200,15 @@ def brooks_context_adjustment(
     if len(bars) < 90:
         return 0.0, [], 0.0, []
 
-    recent = bars[-60:]
+    recent = bars[-120:] if len(bars) >= 120 else bars[-60:]
     recent_20 = bars[-20:]
     bullish_bonus = 0.0
     bullish_factors: list[str] = []
     bearish_bonus = 0.0
     bearish_factors: list[str] = []
 
-    highs = indexed_swing_highs(recent, left=2, right=2)
-    lows = indexed_swing_lows(recent, left=2, right=2)
+    highs = indexed_swing_highs(recent, left=3, right=3)
+    lows = indexed_swing_lows(recent, left=3, right=3)
     higher_highs = len(highs) >= 2 and highs[-1][2] > highs[-2][2] * 1.01
     higher_lows = len(lows) >= 2 and lows[-1][2] > lows[-2][2] * 1.01
     ma30_prior = sma(closes[:-10], 30)
@@ -987,8 +1223,21 @@ def brooks_context_adjustment(
     overlap_ratio = overlap_count / max(len(recent_20) - 1, 1)
 
     if ma30 > ma60 and ma30_prior is not None and ma30 > ma30_prior and higher_highs and higher_lows:
-        bullish_bonus += 8.0
+        bullish_bonus += 20.0
         bullish_factors.append("强趋势背景")
+
+    # 长期趋势检测（200 根 K 线）
+    long_term_highs = indexed_swing_highs(recent, left=4, right=4)
+    long_term_lows = indexed_swing_lows(recent, left=4, right=4)
+    lt_higher_highs = len(long_term_highs) >= 3 and sum(1 for i in range(1, len(long_term_highs)) if long_term_highs[i][2] > long_term_highs[i-1][2] * 1.005) >= 2
+    lt_higher_lows = len(long_term_lows) >= 3 and sum(1 for i in range(1, len(long_term_lows)) if long_term_lows[i][2] > long_term_lows[i-1][2] * 1.005) >= 2
+    if lt_higher_highs and lt_higher_lows:
+        bullish_bonus += 8.0
+        bullish_factors.append(f"长期趋势向上({len(long_term_highs)}高{len(long_term_lows)}低)")
+    elif lt_higher_highs or lt_higher_lows:
+        bullish_bonus += 4.0
+        bullish_factors.append("长期趋势偏多")
+
     if overlap_ratio >= 0.72 and range_pct <= 0.32:
         bearish_bonus += 8.0
         bearish_factors.append("重叠K较多/交易区间倾向")
@@ -1000,6 +1249,47 @@ def brooks_context_adjustment(
         bearish_factors.append("波动区间较宽，结构止损要求更严格")
 
     return bullish_bonus, bullish_factors, bearish_bonus, bearish_factors
+
+
+def three_push_wedge(bars: list[Bar], closes: list[float]) -> tuple[bool, list[str]]:
+    """Al Brooks 三推楔形牛旗形态检测。
+
+    条件：
+    1. 最近 40-80 根内有 3 个依次降低的摆荡低点
+    2. 低点之间跌幅递减（第三推动能最弱）
+    3. 第三个低点后出现看涨反转信号
+    """
+    if len(bars) < 40:
+        return False, []
+    window = bars[-80:] if len(bars) >= 80 else bars
+    swing_lows = indexed_swing_lows(window, left=2, right=2)
+    if len(swing_lows) < 3:
+        return False, []
+
+    # 取最近 3 个摆荡低点
+    lows = swing_lows[-3:]
+    push1_val = lows[0][2]
+    push2_val = lows[1][2]
+    push3_val = lows[2][2]
+    if not (push1_val > push2_val > push3_val):
+        return False, []
+
+    drop1 = (push1_val - push2_val) / push1_val * 100
+    drop2 = (push2_val - push3_val) / push2_val * 100
+    if not (drop1 > drop2 * 1.2):
+        return False, []
+
+    # 第三推后需要看涨反转信号
+    current = bars[-1]
+    has_reversal = (
+        bullish_pinbar(current)
+        or bullish_engulfing(bars)
+        or morning_star(bars)
+    )
+    if not has_reversal:
+        return False, []
+
+    return True, [f"三推楔形牛旗:push递减{drop1:.1f}%/{drop2:.1f}%"]
 
 
 def breakout_index_by_date(bars: list[Bar], breakout_date: str | None) -> int | None:
@@ -1017,8 +1307,14 @@ def brooks_breakout_confirmation(
     breakout_date: str | None,
     setup: str,
 ) -> tuple[float, list[str], float, list[str]]:
-    if setup == "二波回踩MA30":
-        return 6.0, ["二波右侧确认"], 0.0, []
+    if setup in ("回踩50%", "二波回踩EMA20", "突破EMA20", "下降通道突破"):
+        factor_map = {
+            "回踩50%": "50%回调确认",
+            "二波回踩EMA20": "二波右侧确认",
+            "突破EMA20": "放量突破EMA20确认",
+            "下降通道突破": "下降通道涨停突破确认",
+        }
+        return 6.0, [factor_map.get(setup, "形态确认")], 0.0, []
 
     breakout_index = breakout_index_by_date(bars, breakout_date)
     if breakout_index is None:
@@ -1079,7 +1375,7 @@ def structure_stop_for_setup(
     level: float,
     setup: str,
 ) -> float | None:
-    if setup == "二波回踩MA30":
+    if setup in ("回踩50%", "二波回踩EMA20"):
         structural_low = min(bar.low for bar in bars[-5:])
     else:
         nearby_tests = [bar.low for bar in bars[-6:] if bar.low <= level * 1.04]
@@ -1168,32 +1464,64 @@ def bullish_pinbar(bar: Bar) -> bool:
     )
 
 
-def confidence_from_ma30_signal(bars: list[Bar], closes: list[float], volumes: list[float]) -> tuple[float, list[str]]:
+def confidence_from_ema20_signal(bars: list[Bar], closes: list[float], volumes: list[float]) -> tuple[float, list[str]]:
     if len(bars) < 32:
         return 0.0, []
     current = bars[-1]
     previous = bars[-2]
-    ma30 = sma(closes, 30)
-    previous_ma30 = sum(closes[-31:-1]) / 30
+    ema20 = ema_series(closes, 20)[-1]
+    previous_ema20 = ema_series(closes[:-1], 20)[-1]
     volume_base = avg(volumes[-21:-1])
     bonus = 0.0
     factors: list[str] = []
 
     if (
-        ma30 is not None
+        ema20 is not None
+        and previous_ema20 is not None
         and volume_base > 0
-        and previous.close <= previous_ma30
-        and current.close > ma30
+        and previous.close <= previous_ema20
+        and current.close > ema20
         and current.volume >= volume_base * 1.2
     ):
         bonus += 12
-        factors.append("放量上穿30日线")
+        factors.append("放量上穿EMA20")
 
-    if ma30 is not None and current.low <= ma30 * 1.015 and current.close >= ma30 and bullish_pinbar(current):
+    if ema20 is not None and current.low <= ema20 * 1.015 and current.close >= ema20 and bullish_pinbar(current):
         bonus += 12
-        factors.append("回踩30日线不破+Pinbar")
+        factors.append("回踩EMA20不破+Pinbar")
 
     return bonus, factors
+
+
+def ema20_support_strength(bars: list[Bar], closes: list[float]) -> tuple[int, int, float, list[str]]:
+    """回溯最近 120 根 K 线，统计 EMA20 支撑有效性。
+
+    返回 (支撑次数, 跌破次数, 支撑评分 0-10, 因子字符串列表)。
+    评分 ≥ 3 表示 EMA20 作为趋势支撑较可靠。
+    """
+    if len(bars) < 70:
+        return 0, 0, 0.0, []
+    supports = 0
+    breakdowns = 0
+    for i in range(max(0, len(bars) - 120), len(bars) - 1):
+        ema20_i = ema_series(closes[: i + 1], 20)[-1]
+        if ema20_i is None:
+            continue
+        bar = bars[i]
+        if bar.low <= ema20_i * 1.02 and bar.close > ema20_i * 1.005:
+            supports += 1
+        elif bar.close < ema20_i * 0.985:
+            breakdowns += 1
+    if supports + breakdowns == 0:
+        return 0, 0, 0.0, []
+    ratio = supports / max(supports + breakdowns, 1)
+    score = min(10.0, supports * 3.5 * ratio)
+    factors: list[str] = []
+    if score >= 5.0:
+        factors.append(f"EMA20趋势支撑强({supports}/{supports+breakdowns})")
+    elif score >= 3.0:
+        factors.append(f"EMA20支撑确认({supports}/{supports+breakdowns})")
+    return supports, breakdowns, score, factors
 
 
 def confidence_from_volume_breakout(
@@ -1218,8 +1546,6 @@ def neckline_volume_confirmed(current: Bar, neckline: float, volume_base: float)
 
 def confidence_from_reversal_structures(bars: list[Bar], closes: list[float]) -> tuple[float, list[str], float, list[str]]:
     recent_bars = bars[-90:]
-    offset = len(bars) - len(recent_bars)
-    macd = macd_dif_series(closes)
     volume_base = avg([bar.volume for bar in bars[-21:-1]])
     current = recent_bars[-1]
     bullish_bonus = 0.0
@@ -1229,22 +1555,6 @@ def confidence_from_reversal_structures(bars: list[Bar], closes: list[float]) ->
 
     highs = indexed_swing_highs(recent_bars)
     lows = indexed_swing_lows(recent_bars)
-    if len(highs) >= 2:
-        first, second = highs[-2], highs[-1]
-        first_macd = macd[offset + first[0]]
-        second_macd = macd[offset + second[0]]
-        if first_macd is not None and second_macd is not None:
-            if second[2] > first[2] * 1.01 and second_macd < first_macd * 0.92:
-                bearish_bonus += 16
-                bearish_factors.append("MACD顶背离")
-    if len(lows) >= 2:
-        first, second = lows[-2], lows[-1]
-        first_macd = macd[offset + first[0]]
-        second_macd = macd[offset + second[0]]
-        if first_macd is not None and second_macd is not None:
-            if second[2] < first[2] * 0.99 and second_macd > first_macd * 0.92:
-                bullish_bonus += 14
-                bullish_factors.append("MACD底背离")
 
     if len(lows) >= 2:
         left_low, right_low = lows[-2], lows[-1]
@@ -1345,44 +1655,45 @@ def confidence_from_reversal_structures(bars: list[Bar], closes: list[float]) ->
 
 
 def confidence_from_price_action(setup: str, signals: list[str]) -> tuple[float, list[str]]:
+    # K线形态信号仍检测并显示在 signals 列表中，但不再参与置信度打分。
+    # 仅按 setup 类型给固定置信度加分。
     setup_bonuses = {
+        "回踩50%": 20.0,
         "突破后回踩": 18.0,
-        "二波回踩MA30": 18.0,
-    }
-    setup_factors = {
-        "突破后回踩": "裸K回踩确认",
-        "二波回踩MA30": "强趋势二波回踩MA30",
+        "二波回踩EMA20": 18.0,
+        "突破EMA20": 18.0,
+        "下降通道突破": 16.0,
     }
     bonus = setup_bonuses.get(setup, 16.0)
-    factors = [setup_factors.get(setup, "裸K突破")]
-    signal_weights = {
-        "放量实体突破": 18.0,
-        "回踩不破": 16.0,
-        "MA30回踩不破": 16.0,
-        "二波启动": 16.0,
-        "吞没": 14.0,
-        "启明星": 14.0,
-    }
-    for signal in signals:
-        bonus += signal_weights.get(signal, 0.0)
-    if signals:
-        factors.append(f"K线确认:{'+'.join(signals)}")
+    factors = [f"裸Ksetup:{setup}"]
     return min(bonus, 48.0), factors
 
 
 def price_action_rank_score(candidate: AShareCandidate) -> float:
     setup_scores = {
+        "回踩50%": 32.0,
         "突破后回踩": 30.0,
-        "二波回踩MA30": 29.0,
+        "二波回踩EMA20": 29.0,
+        "突破EMA20": 27.0,
+        "下降通道突破": 25.0,
     }
     setup_score = setup_scores.get(candidate.setup, 26.0)
     signal_weights = {
+        "50%位实体阳线": 24.0,
         "放量实体突破": 24.0,
+        "50%位Pinbar": 22.0,
         "回踩不破": 22.0,
-        "MA30回踩不破": 22.0,
+        "EMA20回踩不破": 22.0,
         "二波启动": 22.0,
+        "50%位收阳": 20.0,
         "吞没": 20.0,
         "启明星": 20.0,
+        "50%位higher_low": 18.0,
+        "50%位放量": 16.0,
+        "涨停突破下降通道": 22.0,
+        "收盘站上EMA20": 16.0,
+        "放量涨停": 20.0,
+        "放量配合": 14.0,
     }
     signal_score = min(sum(signal_weights.get(signal, 0.0) for signal in candidate.signals), 44.0)
     return setup_score + signal_score
@@ -1410,7 +1721,7 @@ def score_trend_candidate(
     gain_60 = pct_change(current.close, closes[-61])
     velocity_30 = gain_30 / 30
     buy_sell_ratio_60 = buy_sell_volume_ratio(bars, 60)
-    confidence_bonus, confidence_factors = confidence_from_ma30_signal(bars, closes, volumes)
+    confidence_bonus, confidence_factors = confidence_from_ema20_signal(bars, closes, volumes)
     structure_bullish_bonus, structure_bullish_factors, bearish_bonus, bearish_factors = confidence_from_reversal_structures(bars, closes)
     confidence_bonus += structure_bullish_bonus
     confidence_factors.extend(factor for factor in structure_bullish_factors if factor not in confidence_factors)
@@ -1474,102 +1785,112 @@ def score_trend_candidate(
     )
 
 
-def score_wyckoff_reaccumulation(
+def score_range_bound(
     code: str,
     name: str,
     quote: dict[str, Any],
     bars: list[Bar],
     min_buy_sell_ratio: float,
-) -> WyckoffCandidate | None:
+) -> RangeBoundCandidate | None:
     closes = [bar.close for bar in bars]
     volumes = [bar.volume for bar in bars]
     current = bars[-1]
     ma30 = sma(closes, 30)
     ma60 = sma(closes, 60)
-    if ma30 is None or ma60 is None or len(bars) < 140:
+    if ma30 is None or ma60 is None or len(bars) < 130:
         return None
 
-    box_days = STRATEGY2_BOX_DAYS
-    box = bars[-box_days:]
-    pre_window = bars[-130:-box_days]
-    if len(pre_window) < 45:
+    # 较宽的震荡区间（40-60日）
+    range_lookback = min(60, int(len(bars) * 0.5))
+    range_window = bars[-range_lookback:]
+    range_low = min(bar.low for bar in range_window)
+    range_high = max(bar.high for bar in range_window)
+    range_width_pct = (range_high - range_low) / max(range_low, 1e-9) * 100
+    if range_width_pct < 15:
         return None
 
-    box_low = min(bar.low for bar in box)
-    box_high = max(bar.high for bar in box)
-    box_range = max(box_high - box_low, 1e-9)
-    box_range_pct = box_range / max(box_low, 1e-9)
-    box_position = (current.close - box_low) / box_range
-    prior_low = min(bar.low for bar in pre_window)
-    prior_runup = pct_change(box_high, prior_low)
-    gain_30 = pct_change(current.close, closes[-31])
-    gain_60 = pct_change(current.close, closes[-61])
+    # 当前价在区间下沿 0-35% 位置
+    range_height = max(range_high - range_low, 1e-9)
+    range_position = (current.close - range_low) / range_height
+    if not (0.0 <= range_position <= 0.35):
+        return None
+
+    # 盈亏比过滤：上方空间 >= 2x 下方止损风险
+    stop = range_low * 0.995
+    risk = current.close - stop
+    reward = range_high - current.close
+    if risk <= 0 or reward / risk < 2.0:
+        return None
+
+    # Al Brooks 价格行为下沿信号
+    lower_edge_signals: list[str] = []
+    if bullish_pinbar(current):
+        lower_edge_signals.append("看涨Pinbar")
+    if bullish_engulfing(bars):
+        lower_edge_signals.append("吞没")
+    if morning_star(bars):
+        lower_edge_signals.append("启明星")
+    if higher_low(bars):
+        lower_edge_signals.append("更高低点")
+    wedge, wedge_factors = three_push_wedge(bars, closes)
+    if wedge:
+        lower_edge_signals.append(wedge_factors[0] if wedge_factors else "三推楔形")
+
+    if not lower_edge_signals:
+        return None
+
+    # 置信度
+    gain_30 = pct_change(current.close, closes[-31]) if len(closes) >= 31 else 0
+    gain_60 = pct_change(current.close, closes[-61]) if len(closes) >= 61 else 0
     buy_sell_ratio_60 = buy_sell_volume_ratio(bars, 60)
     volume_base = max(avg(volumes[-21:-1]), 1)
     volume_ratio = current.volume / volume_base
-    previous_ma30 = sum(closes[-box_days - 30 : -box_days]) / 30
-    previous_ma60 = sum(closes[-box_days - 80 : -box_days - 20]) / 60
-
-    uptrend_before_box = (
-        prior_runup >= 35
-        and box_low > prior_low * 1.18
-        and current.close > ma60
-        and ma30 >= previous_ma30 * 0.98
-        and ma60 >= previous_ma60 * 0.98
-    )
-    horizontal_box = 0.08 <= box_range_pct <= 0.38
-    near_lower_edge = (
-        current.low <= box_low + box_range * 0.22
-        and current.close <= box_low + box_range * 0.38
-        and current.close >= box_low * 0.985
-    )
-    if not (uptrend_before_box and horizontal_box and near_lower_edge and bullish_pinbar(current)):
-        return None
 
     confidence_factors = [
-        "上涨后横盘箱体",
-        "接近箱体下沿",
-        "下沿看涨Pinbar",
+        f"宽幅震荡区间({range_width_pct:.0f}%)",
+        f"接近区间下沿({range_position:.0%})",
     ]
+    confidence_factors.extend(lower_edge_signals)
+
     if ma30 > ma60:
         confidence_factors.append("MA30在MA60上方")
     if buy_sell_ratio_60 >= min_buy_sell_ratio:
         confidence_factors.append(f"60日买盘强:{buy_sell_ratio_60:.2f}x")
     if volume_ratio <= 0.9:
-        confidence_factors.append("下沿缩量试探")
+        confidence_factors.append("下沿缩量")
 
-    _, structure_factors, bearish_bonus, bearish_factors = confidence_from_reversal_structures(bars, closes)
-    confidence_factors.extend(factor for factor in structure_factors if factor not in confidence_factors)
-    raw_bullish_confidence = (
-        54.0
-        + min(prior_runup, 120) * 0.08
-        + max(0.0, 1.0 - box_position) * 12
+    bullish_bonus, structure_bullish_factors, bearish_bonus, bearish_factors = confidence_from_reversal_structures(bars, closes)
+    confidence_factors.extend(f for f in structure_bullish_factors if f not in confidence_factors)
+
+    raw_bullish = (
+        48.0
+        + max(0.0, 1.0 - range_position) * 18
         + min(max(gain_60, 0), 80) * 0.06
         + min(buy_sell_ratio_60, 4) * 2
+        + len(lower_edge_signals) * 5
     )
     bearish_confidence = min(95.0, 18.0 + bearish_bonus)
-    bullish_confidence = min(96.0, max(5.0, raw_bullish_confidence - bearish_bonus * 0.45))
+    bullish_confidence = min(96.0, max(5.0, raw_bullish - bearish_bonus * 0.45))
     final_score = (
         bullish_confidence
-        + min(prior_runup, 160) * 0.08
-        + (1.0 - min(max(box_position, 0.0), 1.0)) * 12
+        + (1.0 - min(max(range_position, 0.0), 1.0)) * 15
         + min(buy_sell_ratio_60, 5) * 2
+        + len(lower_edge_signals) * 4
         - max(bearish_confidence - 35, 0) * 0.25
-        - max(box_range_pct - 0.28, 0) * 20
     )
 
-    return WyckoffCandidate(
+    return RangeBoundCandidate(
         code=code,
         name=name,
         date=current.date,
         close=current.close,
         pct_change=number(quote.get("changepercent")),
         amount=number(quote.get("amount"), 0) or 0,
-        box_low=box_low,
-        box_high=box_high,
-        box_days=box_days,
-        box_position=box_position,
-        prior_runup=prior_runup,
+        range_low=range_low,
+        range_high=range_high,
+        range_days=range_lookback,
+        range_position=range_position,
+        range_width_pct=range_width_pct,
         gain_30=gain_30,
         gain_60=gain_60,
         buy_sell_ratio_60=buy_sell_ratio_60,
@@ -1580,10 +1901,8 @@ def score_wyckoff_reaccumulation(
         confidence_factors=confidence_factors,
         bearish_confidence=bearish_confidence,
         bearish_factors=bearish_factors,
-        final_score=final_score,
+        lower_edge_signals=lower_edge_signals,
     )
-
-
 def score_price_action(
     code: str,
     name: str,
@@ -1607,54 +1926,112 @@ def score_price_action(
     gain_60 = pct_change(current.close, closes[-61])
     velocity_30 = gain_30 / 30
     buy_sell_ratio_60 = buy_sell_volume_ratio(bars, 60)
-    confidence_bonus, confidence_factors = confidence_from_ma30_signal(bars, closes, volumes)
+    confidence_bonus, confidence_factors = confidence_from_ema20_signal(bars, closes, volumes)
     structure_bullish_bonus, structure_bullish_factors, bearish_bonus, bearish_factors = confidence_from_reversal_structures(bars, closes)
     confidence_bonus += structure_bullish_bonus
     confidence_factors.extend(factor for factor in structure_bullish_factors if factor not in confidence_factors)
 
     previous_ma20 = sum(closes[-23:-3]) / 20
-    previous_ma30 = sum(closes[-33:-3]) / 30
+    ema20 = ema_series(closes, 20)[-1]
+    ema20_before = ema_series(closes[:-3], 20)[-1]
     moving_average_ok = (
         ma20 > previous_ma20
-        and ma30 > previous_ma30
         and current.close > ma20
+        and ema20 is not None
+        and (ema20_before is None or ema20 >= ema20_before * 0.995)
     )
     if not moving_average_ok:
         return None
 
+    # EMA20 支撑趋势检查
+    _, _, ema20_score, ema20_factors = ema20_support_strength(bars, closes)
+    if ema20_score < 3.0:
+        return None
+    confidence_factors.extend(f for f in ema20_factors if f not in confidence_factors)
+
     prior_30 = bars[-31:-1]
     resistance_bar = max(prior_30, key=lambda bar: bar.high)
+
+    # ── 策略一优先：回踩 50% 回调位 ────────────────────────────
+    retrace_50, retrace_level, retrace_date, retrace_factors = detect_50pct_retracement(
+        bars, closes, volumes
+    )
+
     retest, broken_level, broken_date = recent_breakout_retest(bars)
     second_wave = False
     measured_target: float | None = None
     second_wave_factors: list[str] = []
     if not retest and allow_second_wave:
-        second_wave, broken_level, broken_date, measured_target, second_wave_factors = recent_ma30_second_wave(
+        second_wave, broken_level, broken_date, measured_target, second_wave_factors = recent_ema20_second_wave(
             bars,
             closes,
             volumes,
         )
+    ema20_breakout = False
+    ema20_breakout_factors: list[str] = []
     if not retest and not second_wave:
+        ema20_breakout, broken_level, broken_date, ema20_breakout_factors = detect_ema20_breakout(
+            bars,
+            closes,
+            volumes,
+        )
+    channel_breakout = False
+    channel_breakout_factors: list[str] = []
+    if not retrace_50 and not retest and not second_wave and not ema20_breakout:
+        channel_breakout, broken_level, broken_date, channel_breakout_factors = detect_descending_channel_breakout(
+            bars,
+            closes,
+            volumes,
+        )
+    if not retrace_50 and not retest and not second_wave and not ema20_breakout and not channel_breakout:
         return None
 
-    level = broken_level
+    # ── Setup 优先级：回踩50% > 二波EMA20 > 突破EMA20 > 下降通道突破 > 突破后回踩 ──
+    if retrace_50:
+        setup = "回踩50%"
+        level = retrace_level
+        broken_date = retrace_date
+    elif second_wave:
+        setup = "二波回踩EMA20"
+        level = broken_level
+    elif ema20_breakout:
+        setup = "突破EMA20"
+        level = broken_level
+    elif channel_breakout:
+        setup = "下降通道突破"
+        level = broken_level
+    else:
+        setup = "突破后回踩"
+        level = broken_level
+
     if level is None:
         return None
 
-    setup = "二波回踩MA30" if second_wave else "突破后回踩"
     signals: list[str] = []
     if bullish_engulfing(bars):
         signals.append("吞没")
     if morning_star(bars):
         signals.append("启明星")
-    if not second_wave and strong_breakout_bar(bars, level):
+    if not second_wave and not ema20_breakout and strong_breakout_bar(bars, level):
         signals.append("放量实体突破")
     if retest and retest_hold_signal(current, level):
         signals.append("回踩不破")
+    if retrace_50:
+        signals.extend(f for f in retrace_factors if not f.startswith("50%回调"))
     if second_wave:
-        signals.extend(["MA30回踩不破", "二波启动"])
+        signals.extend(["EMA20回踩不破", "二波启动"])
+    if ema20_breakout:
+        signals.extend(["放量突破EMA20"])
+    if channel_breakout:
+        signals.extend(f for f in channel_breakout_factors if f not in signals)
     if not signals:
         return None
+
+    if setup in {"回踩50%", "突破后回踩", "二波回踩EMA20"}:
+        wedge, wedge_factors = three_push_wedge(bars, closes)
+        if wedge:
+            confidence_bonus += 18.0
+            confidence_factors.extend(f for f in wedge_factors if f not in confidence_factors)
 
     volume_base = max(avg(volumes[-21:-1]), 1)
     confirmation_bonus, confirmation_factors, confirmation_bearish_bonus, confirmation_bearish_factors = brooks_breakout_confirmation(
@@ -1670,7 +2047,10 @@ def score_price_action(
     price_action_bonus, price_action_factors = confidence_from_price_action(setup, signals)
     confidence_bonus += price_action_bonus
     confidence_factors.extend(factor for factor in price_action_factors if factor not in confidence_factors)
-    if second_wave:
+    if retrace_50:
+        confidence_bonus += 10.0  # 50% 回调优先级最高
+        confidence_factors.extend(factor for factor in retrace_factors if factor not in confidence_factors)
+    elif second_wave:
         confidence_bonus += 8.0
         confidence_factors.extend(factor for factor in second_wave_factors if factor not in confidence_factors)
     else:
@@ -1769,14 +2149,14 @@ def score_price_action(
 def process_quote(
     quote: dict[str, Any],
     min_buy_sell_ratio: float,
-) -> tuple[AShareCandidate | None, TrendCandidate | None, WyckoffCandidate | None, str | None]:
+) -> tuple[AShareCandidate | None, TrendCandidate | None, RangeBoundCandidate | None, str | None]:
     code = str(quote.get("code", ""))
     name = str(quote.get("name", code))
     try:
         bars = fetch_daily_bars(code)
         price_action = score_price_action(code, name, quote, bars, min_buy_sell_ratio)
         trend = score_trend_candidate(code, name, quote, bars, min_buy_sell_ratio)
-        wyckoff = score_wyckoff_reaccumulation(code, name, quote, bars, min_buy_sell_ratio)
+        wyckoff = score_range_bound(code, name, quote, bars, min_buy_sell_ratio)
         return price_action, trend, wyckoff, None
     except Exception as exc:
         return None, None, None, f"{code} {name}: {exc}"
@@ -2175,6 +2555,8 @@ def apply_community_confidence(
 
 
 def enrich_candidate(candidate: AShareCandidate) -> AShareCandidate:
+    if SKIP_EXTERNAL_CONTEXT:
+        return candidate
     industry, concepts, note = fetch_stock_context(candidate.code, candidate.name)
     adjusted_bullish, adjusted_factors, adjusted_bearish, adjusted_bearish_factors, sector_score = apply_sector_confidence(
         candidate.bullish_confidence,
@@ -2224,6 +2606,8 @@ def enrich_candidate(candidate: AShareCandidate) -> AShareCandidate:
 
 
 def enrich_trend_candidate(candidate: TrendCandidate) -> TrendCandidate:
+    if SKIP_EXTERNAL_CONTEXT:
+        return candidate
     industry, concepts, note = fetch_stock_context(candidate.code, candidate.name)
     adjusted_bullish, adjusted_factors, adjusted_bearish, adjusted_bearish_factors, sector_score = apply_sector_confidence(
         candidate.bullish_confidence,
@@ -2262,7 +2646,9 @@ def enrich_trend_candidate(candidate: TrendCandidate) -> TrendCandidate:
     )
 
 
-def enrich_wyckoff_candidate(candidate: WyckoffCandidate) -> WyckoffCandidate:
+def enrich_range_bound_candidate(candidate: RangeBoundCandidate) -> RangeBoundCandidate:
+    if SKIP_EXTERNAL_CONTEXT:
+        return candidate
     industry, concepts, note = fetch_stock_context(candidate.code, candidate.name)
     adjusted_bullish, adjusted_factors, adjusted_bearish, adjusted_bearish_factors, sector_score = apply_sector_confidence(
         candidate.bullish_confidence,
@@ -2380,6 +2766,46 @@ def watchlist_review_from_trend(candidate: TrendCandidate) -> WatchlistReview:
     )
 
 
+def watchlist_review_from_range_bound(candidate: RangeBoundCandidate) -> WatchlistReview:
+    enriched = enrich_range_bound_candidate(candidate)
+    comment = range_bound_comment(enriched)
+    return WatchlistReview(
+        code=enriched.code,
+        name=enriched.name,
+        date=enriched.date,
+        close=enriched.close,
+        pct_change=enriched.pct_change,
+        amount=enriched.amount,
+        status="策略二观察",
+        setup="策略二:震荡区间下沿",
+        signals=enriched.lower_edge_signals,
+        support=enriched.range_low,
+        target=enriched.range_high,
+        reward_risk=None,
+        reward_risk_confidence=None,
+        ma5=None,
+        ma10=None,
+        ma20=None,
+        ma30=enriched.ma30,
+        ma60=enriched.ma60,
+        volume_ratio=enriched.volume_ratio,
+        gain_30=enriched.gain_30,
+        velocity_30=None,
+        gain_60=enriched.gain_60,
+        buy_sell_ratio_60=enriched.buy_sell_ratio_60,
+        bullish_confidence=enriched.bullish_confidence,
+        confidence_factors=enriched.confidence_factors,
+        bearish_confidence=enriched.bearish_confidence,
+        bearish_factors=enriched.bearish_factors,
+        comment=comment,
+        industry=enriched.industry,
+        concepts=enriched.concepts,
+        community=enriched.community,
+        latest_note=enriched.latest_note,
+        final_score=enriched.final_score + 25,
+    )
+
+
 def diagnose_watchlist_quote(
     code: str,
     name: str,
@@ -2436,8 +2862,9 @@ def diagnose_watchlist_quote(
         )
 
     previous_ma20 = sum(closes[-23:-3]) / 20
-    previous_ma30 = sum(closes[-33:-3]) / 30
-    moving_average_ok = ma20 > previous_ma20 and ma30 > previous_ma30 and current.close > ma20
+    ema20 = ema_series(closes, 20)[-1]
+    ema20_before = ema_series(closes[:-3], 20)[-1]
+    moving_average_ok = ma20 > previous_ma20 and current.close > ma20 and ema20 is not None and (ema20_before is None or ema20 >= ema20_before * 0.995)
     prior_30 = bars[-31:-1]
     resistance_bar = max(prior_30, key=lambda bar: bar.high)
     resistance = resistance_bar.high
@@ -2447,7 +2874,7 @@ def diagnose_watchlist_quote(
     measured_target: float | None = None
     second_wave_factors: list[str] = []
     if not retest:
-        second_wave, second_level, broken_date, measured_target, second_wave_factors = recent_ma30_second_wave(
+        second_wave, second_level, broken_date, measured_target, second_wave_factors = recent_ema20_second_wave(
             bars,
             closes,
             volumes,
@@ -2465,11 +2892,11 @@ def diagnose_watchlist_quote(
     if retest and level is not None and retest_hold_signal(current, level):
         signals.append("回踩不破")
     if second_wave:
-        signals.extend(["MA30回踩不破", "二波启动"])
+        signals.extend(["EMA20回踩不破", "二波启动"])
 
     target: float | None = None
     reward_risk: float | None = None
-    setup = "二波回踩MA30" if second_wave else "突破" if broke_now else "突破后回踩" if retest else "等待突破/回踩"
+    setup = "二波回踩EMA20" if second_wave else "突破" if broke_now else "突破后回踩" if retest else "等待突破/回踩"
     target_candidates = [(date, high) for date, high in swing_highs(bars[:-5]) if high > current.close * 1.01]
     for period in (120, 250):
         segment = bars[-min(period, len(bars)) : -5]
@@ -2499,7 +2926,7 @@ def diagnose_watchlist_quote(
         score = 5.0
     elif not broke_now and not retest and not second_wave:
         status = "未触发"
-        comment = "尚未出现突破后回踩不破或强趋势二波回踩MA30的右侧确认。"
+        comment = "尚未出现突破后回踩不破或强趋势二波回踩EMA20的右侧确认。"
         score = 18.0
     elif not signals:
         status = "接近触发"
@@ -2518,7 +2945,7 @@ def diagnose_watchlist_quote(
         comment = "接近策略条件，但未进入严格候选，建议等收盘确认和次日回踩不破。"
         score = 38.0
 
-    confidence_bonus, confidence_factors = confidence_from_ma30_signal(bars, closes, volumes)
+    confidence_bonus, confidence_factors = confidence_from_ema20_signal(bars, closes, volumes)
     structure_bonus, structure_factors, bearish_bonus, bearish_factors = confidence_from_reversal_structures(bars, closes)
     context_bonus, context_factors, context_bearish_bonus, context_bearish_factors = brooks_context_adjustment(bars, closes, ma30, ma60)
     confirmation_bonus, confirmation_factors, confirmation_bearish_bonus, confirmation_bearish_factors = (
@@ -2575,6 +3002,8 @@ def diagnose_watchlist_quote(
 def enrich_watchlist_review_context(review: WatchlistReview) -> WatchlistReview:
     if review.industry or review.community:
         return review
+    if SKIP_EXTERNAL_CONTEXT:
+        return review
     industry, concepts, note = fetch_stock_context(review.code, review.name)
     community = fetch_guba_community_signal(review.code)
     bullish = review.bullish_confidence if review.bullish_confidence is not None else 40.0
@@ -2622,6 +3051,9 @@ def process_watchlist_quote(
         trend = score_trend_candidate(code, name, quote, bars, min_buy_sell_ratio)
         if trend:
             return watchlist_review_from_trend(trend), None
+        range_bound = score_range_bound(code, name, quote, bars, min_buy_sell_ratio)
+        if range_bound:
+            return watchlist_review_from_range_bound(range_bound), None
         return diagnose_watchlist_quote(code, name, quote, bars, min_buy_sell_ratio), None
     except Exception as exc:
         return None, f"自选股 {code} {name}: {exc}"
@@ -2646,7 +3078,7 @@ def scan_watchlist(
                 reviews.append(review)
             if error:
                 errors.append(error)
-    status_order = {"符合策略": 5, "触发但谨慎": 4, "接近触发": 3, "趋势观察": 2, "未触发": 1, "数据不足": 0}
+    status_order = {"符合策略": 5, "触发但谨慎": 4, "接近触发": 3, "策略二观察": 2, "趋势观察": 2, "未触发": 1, "数据不足": 0}
     reviews.sort(key=lambda item: (status_order.get(item.status, 0), item.final_score), reverse=True)
     enriched_reviews: list[WatchlistReview] = []
     near_context_budget = 12
@@ -2666,13 +3098,13 @@ def scan_a_shares(
     workers: int,
     min_amount: float,
     min_buy_sell_ratio: float,
-) -> tuple[list[AShareCandidate], list[TrendCandidate], list[WyckoffCandidate], list[str], int]:
+) -> tuple[list[AShareCandidate], list[TrendCandidate], list[RangeBoundCandidate], list[str], int]:
     print("Loading A-share universe...", flush=True)
     universe = load_universe(min_amount)
     print(f"Scanning {len(universe)} liquid main-board stocks...", flush=True)
     candidates: list[AShareCandidate] = []
     trend_candidates: list[TrendCandidate] = []
-    wyckoff_candidates: list[WyckoffCandidate] = []
+    range_bound_candidates: list[RangeBoundCandidate] = []
     errors: list[str] = []
     with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
         futures = [executor.submit(process_quote, quote, min_buy_sell_ratio) for quote in universe]
@@ -2683,12 +3115,12 @@ def scan_a_shares(
             if trend_candidate:
                 trend_candidates.append(trend_candidate)
             if wyckoff_candidate:
-                wyckoff_candidates.append(wyckoff_candidate)
+                range_bound_candidates.append(wyckoff_candidate)
             if error:
                 errors.append(error)
             if index % 500 == 0:
                 print(
-                    f"  scanned {index}/{len(universe)}; triggers={len(candidates)}; trends={len(trend_candidates)}; strategy2={len(wyckoff_candidates)}",
+                    f"  scanned {index}/{len(universe)}; triggers={len(candidates)}; trends={len(trend_candidates)}; strategy2={len(range_bound_candidates)}",
                     flush=True,
                 )
 
@@ -2701,33 +3133,34 @@ def scan_a_shares(
         ),
         reverse=True,
     )
+    retrace_50_shortlist = [item for item in candidates if item.setup == "回踩50%"][:top]
     breakout_retest_shortlist = [item for item in candidates if item.setup == "突破后回踩"][:top]
-    ma30_second_wave_shortlist = [item for item in candidates if item.setup == "二波回踩MA30"][:top]
+    ma30_second_wave_shortlist = [item for item in candidates if item.setup == "二波回踩EMA20"][:top]
     other_shortlist = [
         item
         for item in candidates
-        if item.setup not in {"突破后回踩", "二波回踩MA30"}
+        if item.setup not in {"回踩50%", "突破后回踩", "二波回踩EMA20", "突破EMA20"}
     ][:top]
-    shortlist = breakout_retest_shortlist + ma30_second_wave_shortlist + other_shortlist
+    shortlist = retrace_50_shortlist + breakout_retest_shortlist + ma30_second_wave_shortlist + other_shortlist
     trend_candidates.sort(key=lambda item: item.final_score, reverse=True)
     trend_shortlist = [item for item in trend_candidates if item.code not in {candidate.code for candidate in shortlist}][:top]
-    wyckoff_candidates.sort(key=lambda item: item.final_score, reverse=True)
-    wyckoff_shortlist = [
+    range_bound_candidates.sort(key=lambda item: item.final_score, reverse=True)
+    range_bound_shortlist = [
         item
-        for item in wyckoff_candidates
+        for item in range_bound_candidates
         if item.code not in {candidate.code for candidate in shortlist}
     ][:top]
     print(
-        f"Enriching {len(shortlist)} trigger candidates, {len(trend_shortlist)} trend candidates, and {len(wyckoff_shortlist)} strategy2 candidates...",
+        f"Enriching {len(shortlist)} trigger candidates, {len(trend_shortlist)} trend candidates, and {len(range_bound_shortlist)} strategy2 candidates...",
         flush=True,
     )
     enriched = [enrich_candidate(candidate) for candidate in shortlist]
     enriched_trends = [enrich_trend_candidate(candidate) for candidate in trend_shortlist]
-    enriched_wyckoff = [enrich_wyckoff_candidate(candidate) for candidate in wyckoff_shortlist]
+    enriched_range_bound = [enrich_range_bound_candidate(candidate) for candidate in range_bound_shortlist]
     enriched.sort(key=lambda item: item.final_score, reverse=True)
     enriched_trends.sort(key=lambda item: item.final_score, reverse=True)
-    enriched_wyckoff.sort(key=lambda item: item.final_score, reverse=True)
-    return enriched, enriched_trends[:top], enriched_wyckoff[:top], errors, len(universe)
+    enriched_range_bound.sort(key=lambda item: item.final_score, reverse=True)
+    return enriched, enriched_trends[:top], enriched_range_bound[:top], errors, len(universe)
 
 
 def scan_t0_funds(
@@ -2802,7 +3235,7 @@ def section_strength_label(candidate: AShareCandidate) -> str:
     return "；".join(pieces) if pieces else "n/a"
 
 
-def community_label(candidate: AShareCandidate | TrendCandidate | WyckoffCandidate | WatchlistReview) -> str:
+def community_label(candidate: AShareCandidate | TrendCandidate | RangeBoundCandidate | WatchlistReview) -> str:
     community = candidate.community
     if not community:
         return "n/a"
@@ -2816,19 +3249,25 @@ def community_label(candidate: AShareCandidate | TrendCandidate | WyckoffCandida
     return "；".join(pieces)
 
 
-def wyckoff_comment(candidate: WyckoffCandidate) -> str:
+def range_bound_comment(candidate: RangeBoundCandidate) -> str:
     if candidate.bearish_confidence >= 55 and candidate.bearish_factors:
         return f"有顶部/背离风险：{'、'.join(candidate.bearish_factors)}，只观察箱体承接。"
     if candidate.community and (candidate.community.hype_risk_score >= 3.5 or candidate.community.lure_posts >= 3):
         title = f"：{candidate.community.lure_titles[0]}" if candidate.community.lure_titles else ""
         return f"股吧疑似过热{title}；策略二只等下沿Pinbar后的右侧确认。"
     if candidate.bullish_confidence >= 75:
-        return "接近再吸筹区下沿并出现看涨Pinbar，可观察次日是否守住箱体下沿。"
+        return "接近震荡区间下沿并出现Al Brooks价格行为信号，可观察次日是否守住箱体下沿。"
     return "形态接近策略二，但置信度未达高门槛，继续等下沿承接确认。"
 
 
 def trade_comment(candidate: AShareCandidate) -> str:
-    if candidate.setup == "二波回踩MA30":
+    if candidate.setup == "回踩50%":
+        if candidate.bearish_confidence >= 55 and candidate.bearish_factors:
+            return f"顶部/背离风险：{'、'.join(candidate.bearish_factors)}，50%回调位支撑待确认，谨慎进场。"
+        if candidate.bullish_confidence < 75:
+            return "50%回调位结构成立但置信度未达高门槛，等待进一步确认信号。"
+        return "50%回调位支撑有效，若后续跌破50%位或放量转弱按失败处理。"
+    if candidate.setup == "二波回踩EMA20":
         if candidate.community and (candidate.community.hype_risk_score >= 3.5 or candidate.community.lure_posts >= 3):
             title = f"：{candidate.community.lure_titles[0]}" if candidate.community.lure_titles else ""
             return f"股吧疑似诱多/过热话术{title}，只作弱风险提示；二波结构重点看MA30上方承接能否延续。"
@@ -2857,35 +3296,56 @@ def trade_comment(candidate: AShareCandidate) -> str:
     return "可观察突破位上方承接，跌回突破位按假突破处理。"
 
 
-def wyckoff_row(candidate: WyckoffCandidate) -> str:
+def range_bound_row(candidate: RangeBoundCandidate) -> str:
     confidence_reason = "、".join(candidate.confidence_factors) if candidate.confidence_factors else "-"
     bearish_reason = "、".join(candidate.bearish_factors) if candidate.bearish_factors else "-"
     return (
         f"| {candidate.code} | {candidate.name} | {fmt_price(candidate.close)} | {fmt_pct(candidate.pct_change)} | "
-        f"{fmt_price(candidate.box_low)}-{fmt_price(candidate.box_high)} | {candidate.box_position:.0%} | "
-        f"{fmt_pct(candidate.prior_runup)} | {candidate.bullish_confidence:.0f}% | {confidence_reason} | "
+        f"{fmt_price(candidate.range_low)}-{fmt_price(candidate.range_high)} | {candidate.range_position:.0%} | "
+        f"{fmt_pct(candidate.range_width_pct)} | {candidate.bullish_confidence:.0f}% | {confidence_reason} | "
         f"{candidate.bearish_confidence:.0f}% | {bearish_reason} | {section_label(candidate)} | {section_strength_label(candidate)} | "
         f"{community_label(candidate)} | {fmt_pct(candidate.gain_30)} | {fmt_pct(candidate.gain_60)} | "
         f"{candidate.buy_sell_ratio_60:.2f}x | {candidate.ma30:.2f}/{candidate.ma60:.2f} | {candidate.volume_ratio:.2f}x | "
-        f"{wyckoff_comment(candidate)} |"
+        f"{range_bound_comment(candidate)} |"
     )
 
 
-def candidate_row(candidate: AShareCandidate) -> str:
+def candidate_row(candidate: AShareCandidate, fixed_rr: FixedStopRR | None = None) -> str:
     confidence_reason = "、".join(candidate.confidence_factors) if candidate.confidence_factors else "-"
     bearish_reason = "、".join(candidate.bearish_factors) if candidate.bearish_factors else "-"
-    return (
+    base = (
         f"| {candidate.code} | {candidate.name} | {fmt_price(candidate.close)} | {fmt_pct(candidate.pct_change)} | "
         f"{candidate.setup}/{'+'.join(candidate.signals)} | {section_label(candidate)} | {section_strength_label(candidate)} | "
         f"{community_label(candidate)} | "
         f"{candidate.bullish_confidence:.0f}% | {confidence_reason} | {candidate.bearish_confidence:.0f}% | {bearish_reason} | "
         f"{fmt_pct(candidate.velocity_30)}/日 | {fmt_pct(candidate.gain_60)} | {candidate.buy_sell_ratio_60:.2f}x | "
         f"{fmt_price(candidate.support)} | {fmt_price(candidate.stop)} | {fmt_price(candidate.target)} | "
-        f"{candidate.reward_risk:.2f} | {fmt_confidence(candidate.reward_risk_confidence)} | {candidate.volume_ratio:.2f}x | {trade_comment(candidate)} |"
+        f"{candidate.reward_risk:.2f} | {fmt_confidence(candidate.reward_risk_confidence)} | {candidate.volume_ratio:.2f}x | {trade_comment(candidate)}"
     )
+    if fixed_rr is not None:
+        return f"{base} | {format_rr_markdown_row(fixed_rr)} |"
+    return f"{base} |"
 
 
-def append_candidate_table(lines: list[str], candidates: list[AShareCandidate], empty_note: str) -> None:
+def append_candidate_table(
+    lines: list[str],
+    candidates: list[AShareCandidate],
+    empty_note: str,
+    fixed_rr_map: dict[str, FixedStopRR] | None = None,
+) -> None:
+    if fixed_rr_map is not None:
+        lines.extend(
+            [
+                "| 代码 | 名称 | 收盘价 | 当日 | 形态 | 所属板块 | 板块强度 | 社区讨论 | 看涨置信度 | 看涨因子 | 看跌风险 | 看跌因子 | 30日涨速 | 60日涨幅 | 60日买/卖 | 支撑/突破位 | 结构止损 | 上方压力 | 盈亏比 | 盈亏比置信度 | 量比 | 备注 | 固定5%止损RR |",
+                "|---|---|---:|---:|---|---|---|---|---:|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
+            ]
+        )
+        if candidates:
+            for candidate in candidates:
+                lines.append(candidate_row(candidate, fixed_rr_map.get(candidate.code)))
+        else:
+            lines.append(f"| - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | {empty_note} | - |")
+        return
     lines.extend(
         [
             "| 代码 | 名称 | 收盘价 | 当日 | 形态 | 所属板块 | 板块强度 | 社区讨论 | 看涨置信度 | 看涨因子 | 看跌风险 | 看跌因子 | 30日涨速 | 60日涨幅 | 60日买/卖 | 支撑/突破位 | 结构止损 | 上方压力 | 盈亏比 | 盈亏比置信度 | 量比 | 备注 |",
@@ -2896,6 +3356,114 @@ def append_candidate_table(lines: list[str], candidates: list[AShareCandidate], 
         lines.extend(candidate_row(candidate) for candidate in candidates)
     else:
         lines.append(f"| - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | {empty_note} |")
+
+
+def compute_fixed_rr_for_candidates(
+    candidates: list[AShareCandidate],
+) -> dict[str, FixedStopRR]:
+    """2026-06-04 裸 K 规则：对每个候选计算固定 5% 止损 RR。
+
+    ``current_price`` = ``candidate.close``
+    ``nearby_support`` = ``candidate.support``（突破位 / 结构止损上方）
+    ``next_pressure`` = ``candidate.target``（结构上方的下一压力 / 量度目标）
+
+    若 ``next_pressure`` 缺失（一般不会出现，因为 ``score_price_action`` 已保证）、
+    ``reward <= 0`` 或 ``risk <= 0``，函数不会抛异常，对应 ``is_valid_long_candidate``
+    为 ``False``，由 ``rank_best_long_candidates`` 在排序阶段过滤。
+    """
+    rr_map: dict[str, FixedStopRR] = {}
+    for candidate in candidates:
+        rr = compute_fixed_stop_rr(
+            current_price=candidate.close,
+            nearby_support=candidate.support,
+            next_pressure=candidate.target,
+            stop_pct=0.05,
+        )
+        rr_map[candidate.code] = rr
+    return rr_map
+
+
+def rank_candidates_by_fixed_rr(
+    candidates: list[AShareCandidate],
+    rr_map: dict[str, FixedStopRR],
+) -> list[AShareCandidate]:
+    """按 2026-06-04 规则综合排序（fixed RR > setup 质量 > final_score > bullish_confidence）。
+
+    内部把 ``AShareCandidate`` 转成 ``dict`` 喂给 ``rank_best_long_candidates``，
+    并把算出的 ``reward_to_risk`` 用 fixed 5% 版本的 RR 覆盖，
+    以体现"只展示最优做多候选"的口径。
+    """
+    dicts: list[dict] = []
+    for candidate in candidates:
+        rr = rr_map.get(candidate.code)
+        if rr is None or not rr.is_valid_long_candidate:
+            continue
+        dicts.append(
+            {
+                "code": candidate.code,
+                "setup": candidate.setup,
+                "reward_to_risk": rr.reward_to_risk,
+                "final_score": candidate.final_score,
+                "bullish_confidence": candidate.bullish_confidence,
+                "_candidate": candidate,
+            }
+        )
+    ranked = rank_best_long_candidates(dicts)
+    return [item["_candidate"] for item in ranked]
+
+
+def fixed_rr_best_long_section(
+    candidates: list[AShareCandidate],
+    rr_map: dict[str, FixedStopRR],
+    top_n: int,
+) -> list[str]:
+    """渲染"最优做多候选（固定5%止损）"独立小节，供 Markdown 和 Lark 共用。"""
+    ranked = rank_candidates_by_fixed_rr(candidates, rr_map)
+    surfaced = ranked[:top_n]
+    lines: list[str] = [
+        "",
+        "## 最优做多候选（固定5%止损 · 2026-06-04 规则）",
+        "",
+        f"按 fixed 5% 止损 + reward_to_risk + setup 质量综合排序，只 surfaced best long candidates；"
+        f"next_pressure 缺失 / reward<=0 / risk<=0 一律过滤。当前上榜 {len(surfaced)} / 全候选 {len(candidates)}。",
+        "",
+        "| 代码 | 名称 | 收盘价 | 形态 | 支撑/突破位 | 上方压力 | 5%止损 | 风险 | 空间 | RR | 看涨置信度 | final_score | 备注 |",
+        "|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    if surfaced:
+        for candidate in surfaced:
+            rr = rr_map[candidate.code]
+            lines.append(
+                f"| {candidate.code} | {candidate.name} | {fmt_price(candidate.close)} | "
+                f"{candidate.setup} | {fmt_price(candidate.support)} | {fmt_price(candidate.target)} | "
+                f"{fmt_price(rr.stop_price)} | {fmt_price(rr.risk)} | {fmt_price(rr.reward)} | "
+                f"{rr.reward_to_risk:.2f} | {candidate.bullish_confidence:.0f}% | {candidate.final_score:.1f} | "
+                f"{trade_comment(candidate)} |"
+            )
+    else:
+        lines.append(f"| - | - | - | - | - | - | - | - | - | - | - | - | 今天无满足固定5%止损 RR 规则的最优做多候选。 |")
+    return lines
+
+
+def fixed_rr_best_long_lark(
+    candidates: list[AShareCandidate],
+    rr_map: dict[str, FixedStopRR],
+    top_n: int,
+) -> str:
+    """渲染 Lark/飞书消息单行汇总（与 Markdown 共用同一排序）。"""
+    ranked = rank_candidates_by_fixed_rr(candidates, rr_map)
+    surfaced = ranked[:top_n]
+    if not surfaced:
+        return "2026-06-04 固定5%止损 RR: 今天无满足规则的最优做多候选。"
+    pieces: list[str] = ["【固定5%止损 RR · 最优做多候选】"]
+    for index, candidate in enumerate(surfaced, 1):
+        rr = rr_map[candidate.code]
+        pieces.append(
+            f"{index}. {candidate.code} {candidate.name} 收{fmt_price(candidate.close)} "
+            f"形态={candidate.setup} {format_rr_lark_line(rr)} 看涨{candidate.bullish_confidence:.0f}% "
+            f"final={candidate.final_score:.1f}"
+        )
+    return "\n".join(pieces)
 
 
 def t0_fund_comment(item: T0FundCandidate) -> str:
@@ -2994,7 +3562,7 @@ def watchlist_row(review: WatchlistReview) -> str:
 def build_report(
     candidates: list[AShareCandidate],
     trend_candidates: list[TrendCandidate],
-    wyckoff_candidates: list[WyckoffCandidate],
+    range_bound_candidates: list[RangeBoundCandidate],
     t0_fund_candidates: list[T0FundCandidate],
     watchlist_reviews: list[WatchlistReview],
     errors: list[str],
@@ -3005,7 +3573,13 @@ def build_report(
     min_amount: float,
     min_buy_sell_ratio: float,
     t0_fund_min_amount: float,
+    fixed_rr_top_n: int = 5,
 ) -> str:
+    # 2026-06-04 裸 K RR 规则：先算 fixed 5% RR，再按综合排序取 top N
+    fixed_rr_map = compute_fixed_rr_for_candidates(candidates)
+    fixed_rr_ranked = rank_candidates_by_fixed_rr(candidates, fixed_rr_map)
+    fixed_rr_surfaced = fixed_rr_ranked[:fixed_rr_top_n]
+    displayed_long_candidates = fixed_rr_surfaced
     now = dt.datetime.now(dt.timezone.utc).astimezone()
     lines = [
         "# 每日A股裸K做多观察报告",
@@ -3027,13 +3601,28 @@ def build_report(
         lines.append("| - | - | - | - |")
 
     lines.extend(["", "## 快速结论", ""])
-    if candidates:
-        top = candidates[0]
+    if fixed_rr_surfaced:
+        top = fixed_rr_surfaced[0]
+        top_rr = fixed_rr_map[top.code]
         lines.append(
-            f"- 综合最值得观察：{top.code} {top.name}，{top.setup}，盈亏比 {top.reward_risk:.2f}，"
-            f"板块：{section_label(top)}。"
+            f"- 综合最值得观察（按固定5%止损 RR · 2026-06-04 规则）：{top.code} {top.name}，{top.setup}，"
+            f"5%止损 {fmt_price(top_rr.stop_price)}（风险 {fmt_price(top_rr.risk)}），"
+            f"下一压力 {fmt_price(top_rr.next_pressure)}（空间 {fmt_price(top_rr.reward)}），"
+            f"RR {top_rr.reward_to_risk:.2f}，板块：{section_label(top)}。"
         )
-        lines.append("- 执行口径：只筛选已突破、再回踩前压力位附近且未跌破的股票；跌回突破位按假突破处理。")
+        if fixed_rr_surfaced[1:]:
+            names = "、".join(
+                f"{c.code} {c.name} RR={fixed_rr_map[c.code].reward_to_risk:.2f}"
+                for c in fixed_rr_surfaced[1:]
+            )
+            lines.append(f"- 其余上榜（fixed RR 排序）：{names}。")
+        lines.append("- 执行口径：按 2026-06-04 裸 K 规则筛选；stop = current * 0.95；missing/无效 next_pressure 一律过滤；只 surfaced best long candidates。")
+    elif candidates:
+        lines.append(
+            "- 今天有原策略候选，但没有满足固定5%止损 RR / 下一压力有效性的最优做多候选；"
+            "按 2026-06-04 规则不 surfaced 做多候选。"
+        )
+        lines.append("- 执行口径：stop = current * 0.95；missing/无效 next_pressure、reward<=0、risk<=0 一律过滤。")
     elif trend_candidates:
         top_trend = trend_candidates[0]
         lines.append(
@@ -3046,6 +3635,7 @@ def build_report(
     if watchlist_reviews:
         actionable = [item for item in watchlist_reviews if item.status in {"符合策略", "触发但谨慎"}]
         near = [item for item in watchlist_reviews if item.status == "接近触发"]
+        strategy2 = [item for item in watchlist_reviews if item.status == "策略二观察"]
         if actionable:
             names = "、".join(f"{item.code} {item.name}" for item in actionable[:5])
             lines.append(f"- 自选股中当前触发策略检查：{names}。口径为突破后回踩不破或二波回踩MA30，不追突破信号日。")
@@ -3054,11 +3644,22 @@ def build_report(
             lines.append(f"- 自选股暂无严格买点；接近触发的有：{names}。")
         else:
             lines.append("- 自选股暂无严格买点，主要等待突破后回踩不破、二波回踩MA30和看涨K线确认。")
-    if wyckoff_candidates:
-        top_strategy2 = wyckoff_candidates[0]
+        if strategy2:
+            top_s2 = strategy2[0]
+            if top_s2.support is not None and top_s2.target is not None and top_s2.target > top_s2.support:
+                range_pos = (top_s2.close - top_s2.support) / (top_s2.target - top_s2.support)
+            else:
+                range_pos = None
+            pos_str = f"箱体位置 {range_pos:.0%}" if range_pos is not None else ""
+            lines.append(
+                f"- 自选股策略二再吸筹观察：{top_s2.code} {top_s2.name}，"
+                f"{pos_str}，看涨置信度 {top_s2.bullish_confidence:.0f}%。"
+            )
+    if range_bound_candidates:
+        top_strategy2 = range_bound_candidates[0]
         lines.append(
             f"- 策略二再吸筹观察：{top_strategy2.code} {top_strategy2.name}，"
-            f"箱体位置 {top_strategy2.box_position:.0%}，看涨置信度 {top_strategy2.bullish_confidence:.0f}%。"
+            f"箱体位置 {top_strategy2.range_position:.0%}，看涨置信度 {top_strategy2.bullish_confidence:.0f}%。"
         )
     if t0_fund_candidates:
         top_t0 = t0_fund_candidates[0].candidate
@@ -3067,19 +3668,36 @@ def build_report(
             f"{top_t0.setup}，看涨置信度 {top_t0.bullish_confidence:.0f}%，只作可交易基金观察。"
         )
 
-    breakout_retest_candidates = [candidate for candidate in candidates if candidate.setup == "突破后回踩"]
-    ma30_second_wave_candidates = [candidate for candidate in candidates if candidate.setup == "二波回踩MA30"]
+    retrace_50_candidates = [candidate for candidate in displayed_long_candidates if candidate.setup == "回踩50%"]
+    breakout_retest_candidates = [candidate for candidate in displayed_long_candidates if candidate.setup == "突破后回踩"]
+    ma30_second_wave_candidates = [candidate for candidate in displayed_long_candidates if candidate.setup == "二波回踩EMA20"]
+
+    ema20_breakout_candidates = [candidate for candidate in displayed_long_candidates if candidate.setup == "突破EMA20"]
+    channel_breakout_candidates = [candidate for candidate in displayed_long_candidates if candidate.setup == "下降通道突破"]
     other_candidates = [
         candidate
-        for candidate in candidates
-        if candidate.setup not in {"突破后回踩", "二波回踩MA30"}
+        for candidate in displayed_long_candidates
+        if candidate.setup not in {"回踩50%", "突破后回踩", "二波回踩EMA20", "突破EMA20", "下降通道突破"}
     ]
     lines.extend(
         [
             "",
             "## 做多候选",
             "",
-            "### 做多候选A：突破后回踩前压力位",
+            "### 做多候选A：回踩 50% 回调位（策略一优先）",
+            "",
+        ]
+    )
+    append_candidate_table(
+        lines,
+        retrace_50_candidates,
+        "今天未筛出回踩 50% 回调位的严格候选。",
+        fixed_rr_map=fixed_rr_map,
+    )
+    lines.extend(
+        [
+            "",
+            "### 做多候选B：突破后回踩前压力位",
             "",
         ]
     )
@@ -3087,18 +3705,37 @@ def build_report(
         lines,
         breakout_retest_candidates,
         "今天未筛出突破后回踩前压力位的严格候选。",
+        fixed_rr_map=fixed_rr_map,
     )
     lines.extend(
         [
             "",
-            "### 做多候选B：强趋势二波回踩MA30",
+            "### 做多候选C：强趋势二波回踩EMA20",
             "",
         ]
     )
     append_candidate_table(
         lines,
         ma30_second_wave_candidates,
-        "今天未筛出强趋势二波回踩MA30的严格候选。",
+        "今天未筛出强趋势二波回踩EMA20的严格候选。",
+        fixed_rr_map=fixed_rr_map,
+    )
+    lines.extend(
+        [
+            "",
+            "### 做多候选D：下降通道涨停突破（趋势早期信号）",
+            "",
+            "涨停大阳线（+10%）突破持续20根K线以上的下降通道上轨，且收盘站上EMA20。这是趋势可能反转的早期信号，",
+            "胜在进场位置低（趋势刚启动），但假突破风险较高——只作启动观察，不等同于回踩确认后的做多候选A/B/C。",
+            "执行口径：不追涨停信号日，等次日是否有回踩通道上轨不破或缩量整理的右侧确认。",
+            "",
+        ]
+    )
+    append_candidate_table(
+        lines,
+        channel_breakout_candidates,
+        "今天未筛出下降通道涨停突破的趋势早期候选。",
+        fixed_rr_map=fixed_rr_map,
     )
     if other_candidates:
         lines.extend(
@@ -3108,7 +3745,10 @@ def build_report(
                 "",
             ]
         )
-        append_candidate_table(lines, other_candidates, "今天未筛出其他严格形态。")
+        append_candidate_table(lines, other_candidates, "今天未筛出其他严格形态。", fixed_rr_map=fixed_rr_map)
+
+    # 2026-06-04 裸 K RR 规则：独立小节，按 fixed 5% RR 综合排序 surfaced best long candidates
+    lines.extend(fixed_rr_best_long_section(candidates, fixed_rr_map, fixed_rr_top_n))
 
     lines.extend(
         [
@@ -3145,16 +3785,16 @@ def build_report(
     lines.extend(
         [
             "",
-            "## 策略二：威科夫再吸筹观察",
+            "## 策略二：震荡区间选股观察",
             "",
-            f"寻找一段上涨后进入近{STRATEGY2_BOX_DAYS}日横盘箱体、当前接近箱体下沿且出现看涨Pinbar的股票。这里是低吸观察策略，不等同于策略一的突破建仓信号。",
+            f"寻找一段上涨后进入近{STRATEGY2_BOX_DAYS}日横盘箱体、当前接近箱体下沿且出现看涨Pinbar的股票。这里是区间下沿承接观察策略，不等同于策略一的突破建仓信号。",
             "",
             "| 代码 | 名称 | 收盘价 | 当日 | 横盘箱体 | 箱体位置 | 前段涨幅 | 看涨置信度 | 看涨因子 | 看跌风险 | 看跌因子 | 所属板块 | 板块强度 | 社区讨论 | 30日涨幅 | 60日涨幅 | 60日买/卖 | MA30/60 | 量比 | 备注 |",
             "|---|---|---:|---:|---:|---:|---:|---:|---|---:|---|---|---|---|---:|---:|---:|---|---:|---|",
         ]
     )
-    if wyckoff_candidates:
-        lines.extend(wyckoff_row(candidate) for candidate in wyckoff_candidates)
+    if range_bound_candidates:
+        lines.extend(range_bound_row(candidate) for candidate in range_bound_candidates)
     else:
         lines.append("| - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | 今天未筛出符合策略二的主板股票。 |")
 
@@ -3170,7 +3810,7 @@ def build_report(
         ]
     )
     if watchlist_reviews:
-        priority = [item for item in watchlist_reviews if item.status in {"符合策略", "触发但谨慎", "接近触发", "趋势观察"}]
+        priority = [item for item in watchlist_reviews if item.status in {"符合策略", "触发但谨慎", "接近触发", "策略二观察", "趋势观察"}]
         others = [item for item in watchlist_reviews if item not in priority]
         displayed = priority[:24] + others[: max(0, 32 - len(priority[:24]))]
         lines.extend(watchlist_row(review) for review in displayed)
@@ -3180,9 +3820,9 @@ def build_report(
     else:
         lines.append("| - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | 未配置或未取到自选股。 |")
 
-    if candidates:
+    if displayed_long_candidates:
         lines.extend(["", "## 消息面摘录", ""])
-        for candidate in candidates:
+        for candidate in displayed_long_candidates:
             note = candidate.latest_note or "未抓到明确最新公告摘要，按技术和板块强度观察。"
             lines.append(f"- {candidate.code} {candidate.name}：{note}")
     if trend_candidates:
@@ -3201,6 +3841,8 @@ def build_report(
                 f"股票池为沪深主板、非ST、非新股、成交额不低于 {fmt_amount(min_amount)} 的股票。"
                 "技术筛选要求：策略一A为近12日已收盘突破前30日压力位，当前回踩前压力位附近并站稳；"
                 "策略一B为前段涨幅不低于40%，从前高回撤约12%-55%，最近回踩MA30不破后出现二波启动；"
+                "策略一D为涨停大阳线（+10%）突破持续20根K线以上的下降通道上轨且收盘站上EMA20，"
+                "作为趋势早期启动信号，不追信号日，等次日回踩通道上轨不破或缩量整理确认；"
                 "均线硬门槛为MA20和MA30上行，且收盘价在MA20上方；"
                 "出现吞没、启明星、回踩不破、MA30回踩不破或二波启动，且结构止损风险不超过5%、盈亏比大于1.00。"
             ),
@@ -3211,24 +3853,31 @@ def build_report(
                 f"趋势观察池要求60日买卖盘强度不低于 {min_buy_sell_ratio:.2f}x。"
             ),
             "突破压力位时参考成交量；放量突破会提高后市看涨置信度，并在置信因子中标注。",
-            "参考Al Brooks价格行为口径新增右侧确认层：强趋势背景加分；重叠K较多、交易区间上沿首次突破、突破K收盘偏弱、突破后跌回压力位会提高看跌风险；突破后站稳多日或二次回踩不破会提高看涨置信度。",
+            "参考Al Brooks价格行为口径新增右侧确认层：强趋势背景加分；重叠K较多、交易区间上沿首次突破、突破K收盘偏弱、突破后跌回压力位会提高看跌风险；突破后站稳多日、二次回踩不破，或回踩阶段形成三推楔形牛旗并出现看涨反转K线，会提高看涨置信度。",
             "回踩不破要求当日触及突破位附近后收在其上方，并收阳或形成看涨Pinbar；单纯大阴线守住旧压力位不算严格信号。",
-            "二波回踩MA30要求前段已有显著涨幅，回撤触及MA30附近后未有效跌破，当前收阳并放量或重新突破短线高点。",
+            "二波回踩EMA20要求前段已有显著涨幅，回撤触及MA30附近后未有效跌破，当前收阳并放量或重新突破短线高点。",
             "执行口径调整为：突破信号日不纳入严格做多候选，只在后续回踩突破位附近或MA30附近且不破位时纳入。",
             "板块强度纳入置信度和排序：强行业/强概念共振加分，弱板块增加看跌风险；但不作为建仓硬条件。",
             "东方财富股吧讨论度纳入低权重情绪因子：讨论活跃且情绪不过热时小幅加分；疑似诱多/过热话术只作为弱风险提示和小幅扣分，不作为强信号。",
-            "自选股检查复用同一套策略标准；若出现“符合策略/触发但谨慎”，表示已出现突破后回踩不破或二波回踩MA30结构。",
+            "自选股检查复用同一套策略标准（策略一突破回踩/二波回踩EMA20 + 策略二震荡区间下沿）；若出现“符合策略/触发但谨慎”，表示已出现突破后回踩不破或二波回踩EMA20结构。",
             (
                 f"板块T+0基金观察池来自东方财富场内基金行情，成交额不低于 {fmt_amount(t0_fund_min_amount)}；"
                 "用名称关键词粗筛跨境/QDII、商品、债券、货币等通常支持T+0的ETF/LOF，再复用策略一筛选。"
                 "T+0资格和交易限制以券商端最终规则为准。"
             ),
-            f"策略二筛选威科夫再吸筹观察形态：前段有明显上涨，随后形成近{STRATEGY2_BOX_DAYS}日横盘箱体，当前靠近箱体下沿并出现看涨Pinbar；它是下沿承接观察，不替代策略一突破进场规则。",
+            f"策略二筛选震荡区间选股观察形态：前段有明显上涨，随后形成近{STRATEGY2_BOX_DAYS}日横盘箱体，当前靠近箱体下沿并出现看涨Pinbar；它是下沿承接观察，不替代策略一突破进场规则。",
             "股价放量上穿30日线，或回踩30日线不破并出现Pinbar时，只提高看涨置信度，不作为入选硬条件。",
             "回测归因只作为研究观察项；单次归因调权若不能提升滚动回测表现，不固化到策略权重。",
             "MACD底背离提高看涨置信度；MACD顶背离、M字顶、多重顶提高看跌风险并压低看涨排序。",
             "默认看涨置信度达到75%及以上才视为高置信；只有看涨置信度高、且看跌风险可控时，才更接近进场观察条件。",
             "60日买卖盘强度使用日K代理口径：60日阳线成交量 / 60日阴线成交量。",
+            (
+                "2026-06-04 裸 K risk/reward 规则：`stop_price = current_price * 0.95`，"
+                "`next_pressure` 缺失 / `reward <= 0` / `risk <= 0` 一律不作为做多候选展示；"
+                "按 `reward_to_risk` → 裸 K setup 质量（突破后回踩 / 二波回踩EMA20）→ final_score → 看涨置信度 综合排序，"
+                "日报只 surfaced best long candidates（前 5）。"
+                "本规则用于独立『最优做多候选』小节，不替换原结构止损 / 形态分组的视图。"
+            ),
             f"本次有效股票池：{universe_size} 只；T+0基金观察池：{t0_fund_universe_size} 只；数据错误：{len(errors)} 条。",
         ]
     )
@@ -3278,7 +3927,7 @@ def main() -> int:
 
     try:
         indices = parse_hq_indices()
-        candidates, trend_candidates, wyckoff_candidates, errors, universe_size = scan_a_shares(
+        candidates, trend_candidates, range_bound_candidates, errors, universe_size = scan_a_shares(
             args.top,
             args.workers,
             args.min_amount,
@@ -3300,7 +3949,7 @@ def main() -> int:
         report = build_report(
             candidates,
             trend_candidates,
-            wyckoff_candidates,
+            range_bound_candidates,
             t0_fund_candidates,
             watchlist_reviews,
             errors,

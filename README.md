@@ -81,6 +81,7 @@ Together they provide both the tactical (entry/exit timing) and the strategic (f
 trade-agent/
 ├── trading_strategy.py              # Core library — data types, indicators, trade plans
 ├── a_share_daily_agent.py           # A-share daily scanner (most comprehensive)
+├── a_share_trading_calendar.py      # Mainland China A-share trading-day guard
 ├── backtest_a_share_skill.py        # Slice & rolling backtest engine
 ├── review_a_share_10day_signals.py  # 10-day historical signal review
 ├── stock_daily_agent.py             # US stock long/short pattern scanner
@@ -88,7 +89,13 @@ trade-agent/
 ├── send_a_share_report_to_lark.py   # Lark/Feishu message delivery
 ├── a_share_watchlist.txt            # Personal watchlist (customizable)
 ├── run_*.ps1                        # PowerShell launchers
-├── reports/                         # Generated reports (gitignored)
+├── reports/                         # Legacy local report cache; generated reports now go to Memory Base
+│   ├── a-share/daily/               # A-share daily reports + a_share_latest.md
+│   ├── a-share/backtests/           # A-share slice/rolling backtests
+│   ├── a-share/signal-reviews/      # A-share 10-day signal reviews
+│   ├── crypto/daily/                # Crypto daily reports + latest.md
+│   ├── stocks/daily/                # US stock daily reports + stock_latest.md
+│   └── market-briefs/               # Daily and strategy market briefs
 │
 └── stock-valuation/                 # ★ Stock valuation skill
     ├── SKILL.md                     # Skill definition (Claude Code auto-trigger)
@@ -146,7 +153,7 @@ Reviews strict candidates from 10 days ago with execution discipline: signal day
 
 ### US Stock Agent (`stock_daily_agent.py`)
 
-Scans ~80 liquid US stocks via Nasdaq public API. Ranks by long/short pattern scores.
+Scans ~80 liquid US stocks via public market-data endpoints. Ranks by long/short pattern scores using moving-average structure, breakout/retest levels, MACD, RSI, momentum, volume, and an Al Brooks-style price-action layer for strong trends, pullback holds, three-push wedge bull flags, weak breakouts, and heavy bar overlap.
 
 ```powershell
 .\run_stock_daily_agent.ps1 --top 8
@@ -220,7 +227,11 @@ The script will:
 2. Pick up `LARK_WEBHOOK_URL` / `FEISHU_WEBHOOK_URL` if set, otherwise fallback to `lark-cli`
 3. Deliver the report as a file to the target chat or DM
 
-### Core Library (`trading_strategy.py`)
+Generated reports are written to `F:\VibeCoding\Codex和ClaudeCode\Memory Base\03_Skill产物\trade-agent\reports` and keep the same type-based subfolder layout.
+
+The combined daily run checks the mainland China A-share trading calendar before scanning. On weekends and known 2026 exchange holidays it exits successfully without generating a report or sending to Feishu/Lark. Set `A_SHARE_FORCE_REPORT_ON_CLOSED_MARKET=1` to override the guard for manual testing.
+
+## 🔧 Core Library (`trading_strategy.py`)
 
 Pure Python, stdlib only: `Candle` / `TradePlan` dataclasses, EMA/MACD/RSI/SMA, support/resistance detection, candlestick patterns (engulfing, morning star, piercing, double top), MACD divergence, higher-low detection, risk/reward calculation, confidence-scored trade plan builder.
 
@@ -379,6 +390,7 @@ Agent 会每天在同一时间自动运行报告，完全无需手动操作。
 trade-agent/
 ├── trading_strategy.py              # 核心库 — 数据结构、技术指标、交易计划
 ├── a_share_daily_agent.py           # A股利器（最全面的扫描器）
+├── a_share_trading_calendar.py      # A股交易日历守卫
 ├── backtest_a_share_skill.py        # 切片&滚动回测引擎
 ├── review_a_share_10day_signals.py  # 10天历史信号复盘
 ├── stock_daily_agent.py             # 美股多空形态扫描
@@ -386,7 +398,13 @@ trade-agent/
 ├── send_a_share_report_to_lark.py   # 飞书/Lark 报告推送
 ├── a_share_watchlist.txt            # 个人自选股（可自定义）
 ├── run_*.ps1                        # PowerShell 启动脚本
-├── reports/                         # 生成的报告（已 gitignore）
+├── reports/                         # 本地历史缓存；新报告写入 Memory Base
+│   ├── a-share/daily/               # A股日报 + a_share_latest.md
+│   ├── a-share/backtests/           # A股切片/滚动回测
+│   ├── a-share/signal-reviews/      # A股10日信号复盘
+│   ├── crypto/daily/                # 加密货币日报 + latest.md
+│   ├── stocks/daily/                # 美股日报 + stock_latest.md
+│   └── market-briefs/               # 日度市场简报和策略简报
 │
 └── stock-valuation/                 # ★ 股票估值 skill
     ├── SKILL.md                     # Skill 定义（Claude Code 自动触发）
@@ -444,7 +462,7 @@ python backtest_a_share_skill.py --mode rolling --top 8 --breakeven-trigger-pct 
 
 ### 美股扫描器 (`stock_daily_agent.py`)
 
-通过 Nasdaq 公开 API 扫描约80只高流动性美股，按多/空形态评分排序。
+通过公开行情接口扫描约80只高流动性美股，按多/空形态评分排序；美股做多报告已纳入 Al Brooks 价格行为层，用于观察强趋势、突破回踩、三推楔形牛旗、弱突破和重叠K风险。
 
 ```powershell
 .\run_stock_daily_agent.ps1 --top 8
@@ -518,7 +536,11 @@ $env:LARK_USER_ID = "ou_xxxxx"
 2. 优先使用 `LARK_WEBHOOK_URL` / `FEISHU_WEBHOOK_URL`（如果设置了的话），否则回退到 `lark-cli`
 3. 将报告以文件形式发送到目标会话或私信
 
-### 核心技术库 (`trading_strategy.py`)
+生成报告统一写入 `F:\VibeCoding\Codex和ClaudeCode\Memory Base\03_Skill产物\trade-agent\reports`，并保留同样的报告类型分类子目录。
+
+组合日报脚本会先检查中国大陆 A股交易日历；周末和已知 2026 年交易所节假日会直接成功退出，不生成报告也不推送飞书。手动测试需要强制运行时，可设置 `A_SHARE_FORCE_REPORT_ON_CLOSED_MARKET=1`。
+
+## 🔧 核心技术库 (`trading_strategy.py`)
 
 纯 Python，仅依赖标准库：`Candle` / `TradePlan` 数据类、EMA/MACD/RSI/SMA、支撑/阻力位检测、K线形态识别（吞没、启明星、刺穿、双顶）、MACD背离、低点抬高检测、盈亏比计算、置信度评分交易计划构建器。
 

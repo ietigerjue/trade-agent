@@ -45,3 +45,13 @@ reports/
 
 # Cache (stock-valuation skill runtime cache)
 .cache/
+
+# Runtime logs / temp (Codex automation, daily-run, manual debug)
+*.log
+.automation-logs/
+.codex-automation-logs/
+.codex-logs/
+.codex_logs/
+.tmp/
+automation_logs/
+logs/

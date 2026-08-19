@@ -17,6 +17,17 @@ class Candle:
 
 
 @dataclass(frozen=True)
+class Bar:
+    """OHLCV bar with date string. Used by A-share and US stock strategy functions."""
+    date: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+
+@dataclass(frozen=True)
 class TradePlan:
     side: Side
     entry: float
@@ -30,6 +41,243 @@ class TradePlan:
     setup: str
     reasons: list[str]
     add_plan: str
+
+
+@dataclass(frozen=True)
+class FixedStopRR:
+    """固定 5% 止损规则下的风险/收益计算结果（2026-06-04 裸 K 规则）。"""
+
+    current_price: float
+    nearby_support: float | None
+    next_pressure: float | None
+    stop_price: float
+    risk: float
+    reward: float
+    reward_to_risk: float
+    is_valid_long_candidate: bool
+    invalid_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class SetupQuality:
+    """裸 K setup 质量评分（用于 rank_best_long_candidates 综合排序）。"""
+
+    setup_label: str
+    score: float  # 0-100，越高越好
+    is_actionable: bool  # 是否可作为严格做多候选
+
+
+# Setup 质量映射（与 a_share_daily_agent.score_price_action 中的 setup 字符串一致）
+SETUP_QUALITY_TABLE: dict[str, SetupQuality] = {
+    "回踩50%": SetupQuality("回踩50%", 94.0, True),
+    "突破后回踩": SetupQuality("突破后回踩", 88.0, True),
+    "二波回踩EMA20": SetupQuality("二波回踩EMA20", 92.0, True),
+    "突破EMA20": SetupQuality("突破EMA20", 85.0, True),
+    "下降通道突破": SetupQuality("下降通道突破", 80.0, True),
+}
+
+
+def identify_nearby_support(
+    candles: list[Candle],
+    current_price: float,
+    lookback: int = 20,
+    max_distance_pct: float = 0.05,
+) -> float | None:
+    """识别当前价格下方最近的支撑位。
+
+    取最近 ``lookback`` 根 K 线中、位于 ``current_price`` 下方且距离不超过
+    ``max_distance_pct`` 比例的最低 ``low``。若没有满足条件的支撑位，返回 ``None``。
+
+    缺失/无效输入（空列表、价格 <= 0、lookback <= 0）一律返回 ``None``，
+    不会抛异常，方便上层做"缺失则过滤"的逻辑。
+    """
+    if not candles or current_price <= 0 or lookback <= 0:
+        return None
+    window = candles[-lookback:] if len(candles) >= lookback else candles
+    floor = current_price * (1.0 - max_distance_pct)
+    candidates = [candle.low for candle in window if candle.low > 0 and candle.low <= current_price and candle.low >= floor]
+    if not candidates:
+        return None
+    # 取最接近当前价的支撑（即最高的那一个）
+    return max(candidates)
+
+
+def identify_next_pressure(
+    candles: list[Candle],
+    current_price: float,
+    lookback: int = 120,
+    min_pct_above: float = 0.025,
+) -> float | None:
+    """识别当前价格上方的下一压力位。
+
+    取最近 ``lookback`` 根 K 线中、位于 ``current_price * (1 + min_pct_above)``
+    之上的最低 ``high``。若没有满足条件的压力位，返回 ``None``。
+
+    与 ``identify_nearby_support`` 一致：缺失/无效输入返回 ``None``，不抛异常。
+    """
+    if not candles or current_price <= 0 or lookback <= 0:
+        return None
+    window = candles[-lookback:] if len(candles) >= lookback else candles
+    ceiling = current_price * (1.0 + min_pct_above)
+    candidates = [candle.high for candle in window if candle.high > ceiling]
+    if not candidates:
+        return None
+    # 取最接近当前价的压力（即最低的那一个）
+    return min(candidates)
+
+
+def compute_fixed_stop_rr(
+    current_price: float,
+    nearby_support: float | None,
+    next_pressure: float | None,
+    stop_pct: float = 0.05,
+) -> FixedStopRR:
+    """按 2026-06-04 裸 K 规则计算固定百分比止损的风险/收益。
+
+    - ``stop_price = current_price * (1 - stop_pct)``
+    - ``risk = current_price - stop_price``
+    - ``reward = next_pressure - current_price``
+    - ``reward_to_risk = reward / risk``
+
+    返回值 ``is_valid_long_candidate`` 为 ``False`` 的场景（任一即视为无效）：
+    1. ``current_price <= 0`` 或 ``stop_pct <= 0`` 或 ``stop_pct >= 1``；
+    2. ``next_pressure`` 缺失；
+    3. ``reward <= 0``（next_pressure 已经在 current_price 下方）；
+    4. ``risk <= 0``（current_price 不大于 stop_price）。
+
+    ``invalid_reason`` 字段记录失效原因，便于上层在 Markdown/Lark 中展示。
+    """
+    if current_price <= 0 or stop_pct <= 0 or stop_pct >= 1:
+        return FixedStopRR(
+            current_price=current_price,
+            nearby_support=nearby_support,
+            next_pressure=next_pressure,
+            stop_price=0.0,
+            risk=0.0,
+            reward=0.0,
+            reward_to_risk=0.0,
+            is_valid_long_candidate=False,
+            invalid_reason="invalid_input",
+        )
+
+    stop_price = current_price * (1.0 - stop_pct)
+    risk = current_price - stop_price
+    if risk <= 0:
+        return FixedStopRR(
+            current_price=current_price,
+            nearby_support=nearby_support,
+            next_pressure=next_pressure,
+            stop_price=stop_price,
+            risk=risk,
+            reward=0.0,
+            reward_to_risk=0.0,
+            is_valid_long_candidate=False,
+            invalid_reason="risk_non_positive",
+        )
+
+    if next_pressure is None:
+        return FixedStopRR(
+            current_price=current_price,
+            nearby_support=nearby_support,
+            next_pressure=None,
+            stop_price=stop_price,
+            risk=risk,
+            reward=0.0,
+            reward_to_risk=0.0,
+            is_valid_long_candidate=False,
+            invalid_reason="missing_next_pressure",
+        )
+
+    reward = next_pressure - current_price
+    if reward <= 0:
+        return FixedStopRR(
+            current_price=current_price,
+            nearby_support=nearby_support,
+            next_pressure=next_pressure,
+            stop_price=stop_price,
+            risk=risk,
+            reward=reward,
+            reward_to_risk=0.0,
+            is_valid_long_candidate=False,
+            invalid_reason="reward_non_positive",
+        )
+
+    return FixedStopRR(
+        current_price=current_price,
+        nearby_support=nearby_support,
+        next_pressure=next_pressure,
+        stop_price=stop_price,
+        risk=risk,
+        reward=reward,
+        reward_to_risk=reward / risk,
+        is_valid_long_candidate=True,
+    )
+
+
+def rank_best_long_candidates(
+    candidates: list[dict],
+    rr_key: str = "reward_to_risk",
+    setup_key: str = "setup",
+    final_score_key: str = "final_score",
+    bullish_confidence_key: str = "bullish_confidence",
+) -> list[dict]:
+    """按 reward_to_risk + setup 质量 + 现有 final_score 综合排序做多候选。
+
+    仅返回 ``is_valid_long_candidate is True`` 的候选；其余一律过滤。
+    排序规则：
+      1. ``reward_to_risk`` 降序（主键）
+      2. setup 质量分数降序（次键，使用 ``SETUP_QUALITY_TABLE``）
+      3. ``final_score`` 降序
+      4. ``bullish_confidence`` 降序
+    输入候选为 ``dict``（每个 dict 至少包含上述 4 个键），便于直接接 ``AShareCandidate`` 的 ``__dict__``。
+    """
+    valid: list[dict] = []
+    for candidate in candidates:
+        if "is_valid_long_candidate" in candidate and candidate.get("is_valid_long_candidate") is not True:
+            continue
+        rr = candidate.get(rr_key)
+        if rr is None or rr <= 0:
+            continue
+        setup_quality = SETUP_QUALITY_TABLE.get(candidate.get(setup_key, ""))
+        if setup_quality is None or not setup_quality.is_actionable:
+            continue
+        valid.append(candidate)
+
+    def sort_key(item: dict):
+        setup_quality = SETUP_QUALITY_TABLE.get(item.get(setup_key, ""), SetupQuality(item.get(setup_key, ""), 0.0, False))
+        return (
+            -float(item.get(rr_key, 0.0)),
+            -setup_quality.score,
+            -float(item.get(final_score_key, 0.0)),
+            -float(item.get(bullish_confidence_key, 0.0)),
+        )
+
+    return sorted(valid, key=sort_key)
+
+
+def format_rr_markdown_row(rr: FixedStopRR) -> str:
+    """把 ``FixedStopRR`` 渲染成单行 Markdown 字段片段（用于日报表格）。"""
+    if not rr.is_valid_long_candidate:
+        reason = rr.invalid_reason or "invalid"
+        return f"5%止损: n/a({reason}); RR: n/a"
+    support_text = f"{rr.nearby_support:.2f}" if rr.nearby_support is not None else "n/a"
+    return (
+        f"5%止损 {rr.stop_price:.2f} (风险 {rr.risk:.2f}); "
+        f"下一压力 {rr.next_pressure:.2f} (空间 {rr.reward:.2f}); "
+        f"RR {rr.reward_to_risk:.2f}; 支撑 {support_text}"
+    )
+
+
+def format_rr_lark_line(rr: FixedStopRR) -> str:
+    """把 ``FixedStopRR`` 渲染成单行 Lark/飞书消息片段。"""
+    if not rr.is_valid_long_candidate:
+        return f"[RR无效:{rr.invalid_reason or 'invalid'}]"
+    support_text = f"{rr.nearby_support:.2f}" if rr.nearby_support is not None else "n/a"
+    return (
+        f"5%止损={rr.stop_price:.2f} 风险={rr.risk:.2f} "
+        f"下一压力={rr.next_pressure:.2f} 空间={rr.reward:.2f} "
+        f"RR={rr.reward_to_risk:.2f} 支撑={support_text}"
+    )
 
 
 def ema(values: list[float], period: int) -> float | None:

@@ -26,7 +26,9 @@ import urllib.request
 from pathlib import Path
 
 
-DEFAULT_REPORT = Path("reports/a_share_latest.md")
+DEFAULT_REPORT = Path(
+    "F:/VibeCoding/Codex和ClaudeCode/Memory Base/03_Skill产物/trade-agent/reports/a-share/daily/a_share_latest.md"
+)
 DEFAULT_SEND_MODE = "file"
 
 
@@ -34,7 +36,11 @@ def read_report(path: Path, max_chars: int) -> str:
     content = path.read_text(encoding="utf-8").strip()
     if len(content) <= max_chars:
         return content
-    return content[:max_chars].rstrip() + "\n\n...报告过长，已截断；完整内容见本机 reports/a_share_latest.md"
+    return (
+        content[:max_chars].rstrip()
+        + "\n\n...报告过长，已截断；完整内容见本机 "
+        + "F:/VibeCoding/Codex和ClaudeCode/Memory Base/03_Skill产物/trade-agent/reports/a-share/daily/a_share_latest.md"
+    )
 
 
 def title_from_report(text: str) -> str:
@@ -142,13 +148,19 @@ def build_lark_cli_target_args(executable: str, chat_id: str | None, user_id: st
     raise RuntimeError("set LARK_CHAT_ID or LARK_USER_ID, or run lark-cli auth login")
 
 
-def report_arg_for_lark_cli(report_path: Path) -> str:
+def report_arg_for_lark_cli(report_path: Path) -> tuple[str, str | None]:
+    """Return (file_arg, cwd_override) for lark-cli --file.
+
+    lark-cli requires a relative path for --file. When the report is under CWD,
+    return the relative path with no cwd override. Otherwise return just the
+    filename and the report's parent directory so the caller can cd there.
+    """
     absolute_report = report_path.resolve()
     cwd = Path.cwd().resolve()
     try:
-        return str(absolute_report.relative_to(cwd))
-    except ValueError as exc:
-        raise RuntimeError("lark-cli file uploads require the report path to be under the current workspace") from exc
+        return str(absolute_report.relative_to(cwd)), None
+    except ValueError:
+        return absolute_report.name, str(absolute_report.parent)
 
 
 def send_lark_cli(
@@ -162,14 +174,25 @@ def send_lark_cli(
     executable = find_lark_cli()
     if not executable:
         raise RuntimeError("lark-cli is not on PATH")
-    args = [executable, "im", "+messages-send", "--as", identity]
-    args.extend(build_lark_cli_target_args(executable, chat_id, user_id))
+    target_args = build_lark_cli_target_args(executable, chat_id, user_id)
+    base_args = [executable, "im", "+messages-send", "--as", identity]
+    base_args.extend(target_args)
+    run_kwargs: dict[str, Any] = {}
     if send_mode == "file":
-        args.extend(["--file", report_arg_for_lark_cli(report_path)])
+        summary_args = [*base_args, "--text", text]
+        summary_args.extend(["--idempotency-key", f"a-share-daily-{report_date_for_key(report_path, text)}-file-summary"])
+        subprocess.run(summary_args, check=True, text=True)
+
+        file_arg, file_cwd = report_arg_for_lark_cli(report_path)
+        args = [*base_args]
+        args.extend(["--file", file_arg])
+        if file_cwd is not None:
+            run_kwargs["cwd"] = file_cwd
     else:
+        args = [*base_args]
         args.extend(["--text", text])
     args.extend(["--idempotency-key", f"a-share-daily-{report_date_for_key(report_path, text)}-{send_mode}"])
-    subprocess.run(args, check=True, text=True)
+    subprocess.run(args, check=True, text=True, **run_kwargs)
 
 
 def main() -> int:
